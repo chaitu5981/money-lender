@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Text } from "@/components/ui/text";
+import { useTheme } from "@/lib/theme-context";
 import { MaterialIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import DateTimePicker from "@react-native-community/datetimepicker";
@@ -74,6 +75,7 @@ const diffDaysExclusive = (start: Date, end: Date): number => {
 };
 
 export default function Index() {
+  const { colorScheme, toggleTheme } = useTheme();
   const [interestRate, setInterestRate] = useState<string>("");
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
@@ -102,6 +104,8 @@ export default function Index() {
   const [loanAmount, setLoanAmount] = useState<number>(0);
   const [calculationDetails, setCalculationDetails] = useState<string>("");
   const [hasCalculated, setHasCalculated] = useState<boolean>(false);
+  const [calculationSuccessful, setCalculationSuccessful] =
+    useState<boolean>(false);
   const [yearSummaries, setYearSummaries] = useState<
     {
       yearNumber: number;
@@ -218,12 +222,42 @@ export default function Index() {
     );
   };
 
+  // Helper function to sort transactions by date
+  // When dates are the same, borrowals (receipts) come before repayments (payments)
   const sortTransactionsByDate = (
     transactions: Transaction[]
   ): Transaction[] => {
-    return [...transactions].sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
+    return [...transactions].sort((a, b) => {
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      if (dateA !== dateB) {
+        return dateA - dateB;
+      }
+      // Same date: receipts (borrowals) come before payments (repayments)
+      // receipt type = 0, payment type = 1, so receipts sort first
+      const typeA = a.type === "receipt" ? 0 : 1;
+      const typeB = b.type === "receipt" ? 0 : 1;
+      return typeA - typeB;
+    });
+  };
+
+  // Helper function to sort combined transactions (with type property)
+  const sortCombinedTransactions = <
+    T extends { date: string; type: "payment" | "receipt" },
+  >(
+    transactions: T[]
+  ): T[] => {
+    return [...transactions].sort((a, b) => {
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      if (dateA !== dateB) {
+        return dateA - dateB;
+      }
+      // Same date: receipts (borrowals) come before payments (repayments)
+      const typeA = a.type === "receipt" ? 0 : 1;
+      const typeB = b.type === "receipt" ? 0 : 1;
+      return typeA - typeB;
+    });
   };
 
   const handlePaymentSubmit = async () => {
@@ -297,8 +331,8 @@ export default function Index() {
 
   const handleDeletePayment = async (paymentId: string) => {
     Alert.alert(
-      "Delete Payment",
-      "Are you sure you want to delete this payment?",
+      "Delete Repayment",
+      "Are you sure you want to delete this repayment?",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -399,8 +433,8 @@ export default function Index() {
 
   const handleDeleteReceipt = async (receiptId: string) => {
     Alert.alert(
-      "Delete Receipt",
-      "Are you sure you want to delete this receipt?",
+      "Delete Borrowal",
+      "Are you sure you want to delete this borrowal?",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -514,10 +548,11 @@ export default function Index() {
         : startOfDay(new Date());
 
       // Combine and sort all transactions by date
-      const allTransactions = [
+      // When dates are the same, borrowals (receipts) come before repayments (payments)
+      const allTransactions = sortCombinedTransactions([
         ...currentPayments.map((t) => ({ ...t, type: "payment" as const })),
         ...currentReceipts.map((t) => ({ ...t, type: "receipt" as const })),
-      ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      ]);
 
       let principal = 0;
       let totalInterest = 0;
@@ -640,7 +675,22 @@ export default function Index() {
               date: startOfDay(new Date(t.date)),
               tx: t,
             })),
-          ].sort((a, b) => a.date.getTime() - b.date.getTime());
+          ].sort((a, b) => {
+            const dateA = a.date.getTime();
+            const dateB = b.date.getTime();
+            if (dateA !== dateB) {
+              return dateA - dateB;
+            }
+            // Same date: anniversaries come first, then receipts (borrowals) before payments (repayments)
+            if (a.type === "anniv" && b.type === "tx") return -1;
+            if (a.type === "tx" && b.type === "anniv") return 1;
+            if (a.type === "tx" && b.type === "tx") {
+              const typeA = a.tx.type === "receipt" ? 0 : 1;
+              const typeB = b.tx.type === "receipt" ? 0 : 1;
+              return typeA - typeB;
+            }
+            return 0;
+          });
 
           let currentPrincipalForYearSim = 0;
           let lastDate = firstDate;
@@ -792,17 +842,9 @@ export default function Index() {
       const totalRepaid = currentPayments.reduce((sum, p) => sum + p.amount, 0);
       const outstandingPrincipal = totalBorrowed - totalRepaid;
 
-      // Compute Total Amount Due per spec (without relying on summaries order):
-      // Principal-before of LAST cell should be the New Principal from the last year summary,
-      // falling back to the computed final principal-before when no summary exists yet
+      // Get the last year summary for interest calculation
       const lastSummaryForTotal =
         summaries.length > 0 ? summaries[summaries.length - 1] : null;
-      const principalBeforeLastCell = Math.max(
-        0,
-        (lastSummaryForTotal
-          ? lastSummaryForTotal.newPrincipal
-          : finalPrincipalBeforeForDisplay) || 0
-      );
 
       // Calculate total interest:
       // - If there's a year summary, only use final period interest (since year summaries include previous interests)
@@ -822,15 +864,42 @@ export default function Index() {
           allYear1Interest + Math.max(0, finalPeriodInterest || 0);
       }
 
-      const totalAmountDue = principalBeforeLastCell + finalYearInterestSum;
+      // Calculate total amount due: Outstanding Principal + Interest
+      // Use actual outstanding principal (can be negative), not the clamped principalBeforeLastCell
+      const totalAmountDue = outstandingPrincipal + finalYearInterestSum;
+
+      // Check if total amount due would be negative
+      if (totalAmountDue < 0) {
+        Alert.alert(
+          "Invalid Calculation",
+          "The total amount due is negative. This means repayments exceed borrowals plus interest. Please adjust your transactions.",
+          [{ text: "OK" }]
+        );
+        // Reset calculated values
+        setLoanAmount(0);
+        setCalculatedInterest(0);
+        setCalculatedAmount(0);
+        setCalculationDetails("");
+        setCalculationSuccessful(false);
+        return; // Don't proceed with setting results
+      }
 
       setLoanAmount(outstandingPrincipal);
       setCalculatedInterest(Math.max(0, totalAmountDue - outstandingPrincipal));
       setCalculatedAmount(Math.max(0, totalAmountDue));
       setCalculationDetails(details);
+      setCalculationSuccessful(true);
     },
     [interestRate, calculationEndDate]
   );
+
+  // Sync hasCalculated with calculationSuccessful
+  useEffect(() => {
+    if (hasCalculated && !calculationSuccessful) {
+      // If user clicked Calculate but calculation failed, reset hasCalculated
+      setHasCalculated(false);
+    }
+  }, [hasCalculated, calculationSuccessful]);
 
   // Recalculate when interest rate, payments, or receipts change
   useEffect(() => {
@@ -851,10 +920,11 @@ export default function Index() {
   ]);
 
   // Build combined sorted transactions for rendering
-  const combinedTransactions = [
+  // When dates are the same, borrowals (receipts) come before repayments (payments)
+  const combinedTransactions = sortCombinedTransactions([
     ...payments.map((t) => ({ ...t, type: "payment" as const })),
     ...receipts.map((t) => ({ ...t, type: "receipt" as const })),
-  ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  ]);
 
   // Get the latest transaction date for validation
   const latestTransactionDate =
@@ -919,9 +989,10 @@ export default function Index() {
         return;
       }
 
-      const sortedTransactions = [...combinedTransactions].sort(
-        (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-      );
+      // Sort transactions: when dates are the same, borrowals come before repayments
+      const sortedTransactions = sortCombinedTransactions([
+        ...combinedTransactions,
+      ]);
       const sortedSummaries = [...yearSummaries].sort(
         (a, b) => new Date(a.toDate).getTime() - new Date(b.toDate).getTime()
       );
@@ -1478,27 +1549,49 @@ export default function Index() {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-background">
-      <StatusBar hidden={false} translucent={false} barStyle="dark-content" />
-      <ScrollView className="flex-1 px-4 pt-4">
-        <View className="mb-6">
-          <Text variant="h2" className="mb-4">
-            Money Lender App
-          </Text>
+    <SafeAreaView
+      className={`flex-1 bg-background ${colorScheme === "dark" ? "dark" : ""}`}
+    >
+      <StatusBar
+        hidden={false}
+        translucent={false}
+        barStyle={colorScheme === "dark" ? "light-content" : "dark-content"}
+      />
+      <View className="flex-1">
+        <ScrollView className="flex-1 px-4 pt-4">
+          <View className="mb-6 flex-row justify-between items-center">
+            <Text variant="h2" className="mb-4 flex-1">
+              Money lenders calculator
+            </Text>
+            <Button
+              variant="outline"
+              onPress={toggleTheme}
+              className="ml-2 border-border"
+              size="icon"
+            >
+              <MaterialIcons
+                name={colorScheme === "dark" ? "wb-sunny" : "nightlight"}
+                size={24}
+                color={colorScheme === "dark" ? "#fbbf24" : "#000000"}
+              />
+            </Button>
+          </View>
 
           {/* Action Buttons moved to top */}
-          <View
-            className="flex-row justify-between w-full mb-4"
-            style={{ gap: 4 }}
-          >
+          <View className="flex-row w-full mb-4" style={{ gap: 8 }}>
             <Button
               className="bg-red-600 flex-1"
               onPress={() => setShowReceiptModal(true)}
-              style={{ minHeight: 48, paddingVertical: 8 }}
+              style={{
+                minHeight: 48,
+                paddingVertical: 8,
+                paddingHorizontal: 8,
+              }}
             >
               <Text
-                className="text-white text-center"
-                style={{ fontSize: 14, fontWeight: "600" }}
+                className="text-white text-center text-sm font-semibold"
+                numberOfLines={1}
+                ellipsizeMode="tail"
               >
                 Add Borrowal
               </Text>
@@ -1506,11 +1599,16 @@ export default function Index() {
             <Button
               className="bg-green-600 flex-1"
               onPress={() => setShowPaymentModal(true)}
-              style={{ minHeight: 48, paddingVertical: 8 }}
+              style={{
+                minHeight: 48,
+                paddingVertical: 8,
+                paddingHorizontal: 8,
+              }}
             >
               <Text
-                className="text-white text-center"
-                style={{ fontSize: 14, fontWeight: "600" }}
+                className="text-white text-center text-sm font-semibold"
+                numberOfLines={1}
+                ellipsizeMode="tail"
               >
                 Add Repayment
               </Text>
@@ -1542,8 +1640,13 @@ export default function Index() {
               <Button
                 variant="outline"
                 onPress={() => setShowEndDatePicker(true)}
-                className="mr-2"
+                className="mr-2 flex-row items-center gap-2"
               >
+                <MaterialIcons
+                  name="calendar-today"
+                  size={18}
+                  color={colorScheme === "dark" ? "#fff" : "#000"}
+                />
                 <Text>
                   {calculationEndDate
                     ? calculationEndDate.toLocaleDateString()
@@ -1592,7 +1695,9 @@ export default function Index() {
                     );
                     return;
                   }
+                  // Calculate results - it will validate and set calculationSuccessful
                   calculateResults(payments, receipts);
+                  // Set hasCalculated to true - useEffect will sync it with calculationSuccessful
                   setHasCalculated(true);
                 }}
               >
@@ -1643,849 +1748,854 @@ export default function Index() {
               />
             ) : null}
           </View>
-        </View>
 
-        {/* Simple table of all borrowals and repayments */}
-        {combinedTransactions.length > 0 ? (
-          <View className="mb-4 p-3 bg-muted rounded-lg">
-            <Text variant="h3" className="mb-2">
-              Transactions
-            </Text>
-            {/* Header */}
-            <View className="flex-row justify-between pb-1 border-b border-border mb-2">
-              <Text className="text-xs font-semibold" style={{ width: "35%" }}>
-                Date
+          {/* Simple table of all borrowals and repayments */}
+          {combinedTransactions.length > 0 ? (
+            <View className="mb-4 p-3 bg-muted rounded-lg">
+              <Text variant="h3" className="mb-2">
+                Transactions
               </Text>
-              <Text
-                className="text-xs font-semibold"
-                style={{ width: "35%", textAlign: "center" }}
-              >
-                Type
-              </Text>
-              <Text
-                className="text-xs font-semibold"
-                style={{ width: "30%", textAlign: "right" }}
-              >
-                Amount (₹)
-              </Text>
-            </View>
-            {/* Rows */}
-            {combinedTransactions.map((t) => (
-              <View
-                key={`table-${t.id}`}
-                className="flex-row justify-between py-1"
-              >
-                <Text className="text-xs" style={{ width: "35%" }}>
-                  {new Date(t.date).toLocaleDateString()}
+              {/* Header */}
+              <View className="flex-row justify-between pb-1 border-b border-border mb-2">
+                <Text className="text-xs font-semibold w-[25%]">Date</Text>
+                <Text className="text-xs font-semibold w-[25%] text-center">
+                  Type
                 </Text>
-                <Text
-                  className="text-xs"
-                  style={{ width: "35%", textAlign: "center" }}
-                >
-                  {t.type === "receipt" ? "Borrowal" : "Repayment"}
+                <Text className="text-xs font-semibold w-[25%] text-right">
+                  Amount (₹)
                 </Text>
-                <Text
-                  className="text-xs"
-                  style={{ width: "30%", textAlign: "right" }}
-                >
-                  {formatCurrency(t.amount)}
+                <Text className="text-xs font-semibold w-[25%] text-center">
+                  Actions
                 </Text>
               </View>
-            ))}
-          </View>
-        ) : null}
-
-        {/* Results Display */}
-        {hasCalculated && (calculatedInterest > 0 || loanAmount !== 0) ? (
-          <>
-            <View className="mb-6 p-4 bg-muted rounded-lg">
-              <Text variant="h3" className="mb-2">
-                Calculated Results
-              </Text>
-              <Text className="mb-1">{`Outstanding Principal: ₹${formatCurrency(loanAmount)}`}</Text>
-              <Text className="mb-1">{`Interest: ₹${formatCurrency(calculatedInterest)}`}</Text>
-              <Text variant="h4" className="mt-2">
-                {`Total Amount Due: ₹${formatCurrency(calculatedAmount)}`}
-              </Text>
-              {/* Removed overall summary range display per request */}
+              {/* Rows */}
+              {combinedTransactions.map((t) => (
+                <View
+                  key={`table-${t.id}`}
+                  className="flex-row justify-between py-1 items-center"
+                >
+                  <Text className="text-xs w-[25%]">
+                    {new Date(t.date).toLocaleDateString()}
+                  </Text>
+                  <Text className="text-xs w-[25%] text-center">
+                    {t.type === "receipt" ? "Borrowal" : "Repayment"}
+                  </Text>
+                  <Text className="text-xs w-[25%] text-right">
+                    {formatCurrency(t.amount)}
+                  </Text>
+                  <View className="flex-row justify-center items-center w-[25%]">
+                    {t.type === "payment" ? (
+                      <>
+                        <Button
+                          variant="outline"
+                          className="h-7 w-7 rounded-full p-0 mr-1 bg-white dark:bg-gray-800 border-blue-600 dark:border-blue-400 items-center justify-center"
+                          onPress={() => handleEditPayment(t)}
+                          hitSlop={{
+                            top: 8,
+                            bottom: 8,
+                            left: 8,
+                            right: 8,
+                          }}
+                        >
+                          <MaterialIcons
+                            name="edit"
+                            size={14}
+                            color="#2563eb"
+                          />
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          className="h-7 w-7 rounded-full p-0 bg-red-600 items-center justify-center"
+                          onPress={() => handleDeletePayment(t.id)}
+                          hitSlop={{
+                            top: 8,
+                            bottom: 8,
+                            left: 8,
+                            right: 8,
+                          }}
+                        >
+                          <MaterialIcons
+                            name="delete"
+                            size={14}
+                            color="#ffffff"
+                          />
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button
+                          variant="outline"
+                          className="h-7 w-7 rounded-full p-0 mr-1 bg-white dark:bg-gray-800 border-blue-600 dark:border-blue-400 items-center justify-center"
+                          onPress={() => handleEditReceipt(t)}
+                          hitSlop={{
+                            top: 8,
+                            bottom: 8,
+                            left: 8,
+                            right: 8,
+                          }}
+                        >
+                          <MaterialIcons
+                            name="edit"
+                            size={14}
+                            color="#2563eb"
+                          />
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          className="h-7 w-7 rounded-full p-0 bg-red-600 items-center justify-center"
+                          onPress={() => handleDeleteReceipt(t.id)}
+                          hitSlop={{
+                            top: 8,
+                            bottom: 8,
+                            left: 8,
+                            right: 8,
+                          }}
+                        >
+                          <MaterialIcons
+                            name="delete"
+                            size={14}
+                            color="#ffffff"
+                          />
+                        </Button>
+                      </>
+                    )}
+                  </View>
+                </View>
+              ))}
             </View>
-          </>
-        ) : null}
+          ) : null}
 
-        {/* Yearly compounding summaries (every 1 calendar year since first transaction) */}
-        {/* Yearly summaries are interleaved with transactions below */}
+          {/* Results Display */}
+          {hasCalculated &&
+          calculationSuccessful &&
+          (calculatedInterest > 0 || loanAmount !== 0) ? (
+            <>
+              <View className="mb-6 p-4 bg-muted rounded-lg">
+                <Text variant="h3" className="mb-2">
+                  Calculated Results
+                </Text>
+                <Text className="mb-1">{`Outstanding Principal: ₹${formatCurrency(loanAmount)}`}</Text>
+                <Text className="mb-1">{`Interest: ₹${formatCurrency(calculatedInterest)}`}</Text>
+                <Text variant="h4" className="mt-2">
+                  {`Total Amount Due: ₹${formatCurrency(calculatedAmount)}`}
+                </Text>
+                {/* Removed overall summary range display per request */}
+              </View>
+            </>
+          ) : null}
 
-        {/* Transactions Summary (Combined) */}
-        {hasCalculated && (payments.length > 0 || receipts.length > 0) ? (
-          <View className="mb-6">
-            <Text variant="h3" className="mb-2">
-              Interest Report
-            </Text>
+          {/* Yearly compounding summaries (every 1 calendar year since first transaction) */}
+          {/* Yearly summaries are interleaved with transactions below */}
 
-            <View>
-              {(() => {
-                const combined = [
-                  ...payments.map((t) => ({ ...t, type: "payment" as const })),
-                  ...receipts.map((t) => ({ ...t, type: "receipt" as const })),
-                ].sort(
-                  (a, b) =>
-                    new Date(a.date).getTime() - new Date(b.date).getTime()
-                );
-                const summaries = [...yearSummaries].sort(
-                  (a, b) =>
-                    new Date(a.toDate).getTime() - new Date(b.toDate).getTime()
-                );
-                const endDate = calculationEndDate
-                  ? startOfDay(new Date(calculationEndDate))
-                  : null;
-                const rate = parseFloat(interestRate || "0") / 100;
+          {/* Transactions Summary (Combined) */}
+          {hasCalculated &&
+          calculationSuccessful &&
+          (payments.length > 0 || receipts.length > 0) ? (
+            <View className="mb-6">
+              <Text variant="h3" className="mb-2">
+                Interest Report
+              </Text>
 
-                const rendered = [] as any[];
-                let currentPrincipal = 0;
-                const processedTxIds = new Set<string | number>();
-
-                // Track final principal and final year interest for total amount due cell
-                let finalPrincipalAfterLastTx = 0; // Track principal after last transaction in final year
-                let finalYearInterestForTotal = 0;
-                const lastSummaryForTotal =
-                  summaries.length > 0 ? summaries[summaries.length - 1] : null;
-
-                // Determine if we're in the final year (after last summary or no summaries)
-                const finalYearStart = lastSummaryForTotal
-                  ? startOfDay(new Date(lastSummaryForTotal.toDate))
-                  : combined.length > 0
-                    ? startOfDay(new Date(combined[0].date))
-                    : null;
-
-                // Group transactions by year cycles
-                for (let yearNum = 1; ; yearNum++) {
-                  const yearSummary = summaries.find(
-                    (s) => s.yearNumber === yearNum
+              <View>
+                {(() => {
+                  // Combine and sort transactions: when dates are the same, borrowals come before repayments
+                  const combined = sortCombinedTransactions([
+                    ...payments.map((t) => ({
+                      ...t,
+                      type: "payment" as const,
+                    })),
+                    ...receipts.map((t) => ({
+                      ...t,
+                      type: "receipt" as const,
+                    })),
+                  ]);
+                  const summaries = [...yearSummaries].sort(
+                    (a, b) =>
+                      new Date(a.toDate).getTime() -
+                      new Date(b.toDate).getTime()
                   );
+                  const endDate = calculationEndDate
+                    ? startOfDay(new Date(calculationEndDate))
+                    : null;
+                  const rate = parseFloat(interestRate || "0") / 100;
 
-                  // Determine year start date
-                  let yearStart: Date | null = null;
-                  if (yearSummary) {
-                    yearStart = startOfDay(new Date(yearSummary.fromDate));
-                  } else if (yearNum === 1 && combined.length > 0) {
-                    yearStart = startOfDay(new Date(combined[0].date));
-                  } else if (yearNum > 1) {
-                    // For Year 2+ without summary, use the day after previous year's end
-                    const prevYearSummary = summaries.find(
-                      (s) => s.yearNumber === yearNum - 1
+                  const rendered = [] as any[];
+                  let currentPrincipal = 0;
+                  const processedTxIds = new Set<string | number>();
+
+                  // Track final principal and final year interest for total amount due cell
+                  let finalPrincipalAfterLastTx = 0; // Track principal after last transaction in final year
+                  let finalYearInterestForTotal = 0;
+                  const lastSummaryForTotal =
+                    summaries.length > 0
+                      ? summaries[summaries.length - 1]
+                      : null;
+
+                  // Determine if we're in the final year (after last summary or no summaries)
+                  const finalYearStart = lastSummaryForTotal
+                    ? startOfDay(new Date(lastSummaryForTotal.toDate))
+                    : combined.length > 0
+                      ? startOfDay(new Date(combined[0].date))
+                      : null;
+
+                  // Group transactions by year cycles
+                  for (let yearNum = 1; ; yearNum++) {
+                    const yearSummary = summaries.find(
+                      (s) => s.yearNumber === yearNum
                     );
-                    if (prevYearSummary) {
-                      const prevYearEnd = startOfDay(
-                        new Date(prevYearSummary.toDate)
+
+                    // Determine year start date
+                    let yearStart: Date | null = null;
+                    if (yearSummary) {
+                      yearStart = startOfDay(new Date(yearSummary.fromDate));
+                    } else if (yearNum === 1 && combined.length > 0) {
+                      yearStart = startOfDay(new Date(combined[0].date));
+                    } else if (yearNum > 1) {
+                      // For Year 2+ without summary, use the day after previous year's end
+                      const prevYearSummary = summaries.find(
+                        (s) => s.yearNumber === yearNum - 1
                       );
-                      yearStart = new Date(prevYearEnd);
-                      yearStart.setDate(yearStart.getDate() + 1);
-                      yearStart = startOfDay(yearStart);
-                    } else {
-                      // No previous summary either, check if there are unprocessed transactions
+                      if (prevYearSummary) {
+                        const prevYearEnd = startOfDay(
+                          new Date(prevYearSummary.toDate)
+                        );
+                        yearStart = new Date(prevYearEnd);
+                        yearStart.setDate(yearStart.getDate() + 1);
+                        yearStart = startOfDay(yearStart);
+                      } else {
+                        // No previous summary either, check if there are unprocessed transactions
+                        const unprocessedTxs = combined.filter(
+                          (t) => !processedTxIds.has(t.id)
+                        );
+                        if (unprocessedTxs.length > 0) {
+                          // Use the earliest unprocessed transaction date
+                          yearStart = startOfDay(
+                            new Date(unprocessedTxs[0].date)
+                          );
+                        }
+                      }
+                    }
+
+                    const yearEnd = yearSummary
+                      ? startOfDay(new Date(yearSummary.toDate))
+                      : null;
+
+                    // If no yearStart and no unprocessed transactions, break
+                    if (!yearStart) {
                       const unprocessedTxs = combined.filter(
                         (t) => !processedTxIds.has(t.id)
                       );
-                      if (unprocessedTxs.length > 0) {
-                        // Use the earliest unprocessed transaction date
-                        yearStart = startOfDay(
-                          new Date(unprocessedTxs[0].date)
+                      if (unprocessedTxs.length === 0) break;
+                      // If there are unprocessed transactions but no yearStart, something is wrong
+                      break;
+                    }
+
+                    // Collect all transactions in this year that haven't been processed yet
+                    // Include transactions on or before the year end date (inclusive)
+                    // For Year 2+, transactions on the previous year's end date should be excluded
+                    // (they were already processed in the previous year)
+                    const prevYearSummary =
+                      yearNum > 1
+                        ? summaries.find((s) => s.yearNumber === yearNum - 1)
+                        : null;
+                    const effectiveYearStart = prevYearSummary
+                      ? startOfDay(new Date(prevYearSummary.toDate)).getTime() +
+                        86400000 // Next day after previous year end
+                      : yearStart.getTime();
+
+                    const yearTxs = combined.filter((t) => {
+                      const txDate = startOfDay(new Date(t.date));
+                      const txTime = txDate.getTime();
+                      // If no yearEnd (no year summary), include all transactions >= effectiveYearStart
+                      // up to the calculation end date (if it exists)
+                      if (!yearEnd) {
+                        return (
+                          !processedTxIds.has(t.id) &&
+                          txTime >= effectiveYearStart &&
+                          (!endDate || txTime <= endDate.getTime())
                         );
                       }
-                    }
-                  }
-
-                  const yearEnd = yearSummary
-                    ? startOfDay(new Date(yearSummary.toDate))
-                    : null;
-
-                  // If no yearStart and no unprocessed transactions, break
-                  if (!yearStart) {
-                    const unprocessedTxs = combined.filter(
-                      (t) => !processedTxIds.has(t.id)
-                    );
-                    if (unprocessedTxs.length === 0) break;
-                    // If there are unprocessed transactions but no yearStart, something is wrong
-                    break;
-                  }
-
-                  // Collect all transactions in this year that haven't been processed yet
-                  // Include transactions on or before the year end date (inclusive)
-                  // For Year 2+, transactions on the previous year's end date should be excluded
-                  // (they were already processed in the previous year)
-                  const prevYearSummary =
-                    yearNum > 1
-                      ? summaries.find((s) => s.yearNumber === yearNum - 1)
-                      : null;
-                  const effectiveYearStart = prevYearSummary
-                    ? startOfDay(new Date(prevYearSummary.toDate)).getTime() +
-                      86400000 // Next day after previous year end
-                    : yearStart.getTime();
-
-                  const yearTxs = combined.filter((t) => {
-                    const txDate = startOfDay(new Date(t.date));
-                    const txTime = txDate.getTime();
-                    // If no yearEnd (no year summary), include all transactions >= effectiveYearStart
-                    // up to the calculation end date (if it exists)
-                    if (!yearEnd) {
+                      // If yearEnd exists, include transactions in the range [effectiveYearStart, yearEnd]
                       return (
                         !processedTxIds.has(t.id) &&
                         txTime >= effectiveYearStart &&
-                        (!endDate || txTime <= endDate.getTime())
+                        txTime <= yearEnd.getTime()
+                      );
+                    });
+
+                    // Use previous year's newPrincipal as starting principal for this year
+                    if (yearSummary) {
+                      const prevSummary = summaries.find(
+                        (s) => s.yearNumber === yearNum - 1
+                      );
+                      currentPrincipal = prevSummary
+                        ? prevSummary.newPrincipal
+                        : 0;
+                    }
+
+                    // If there's a year summary but no transactions, show interest calculation for the entire year
+                    if (yearSummary && yearTxs.length === 0 && yearEnd) {
+                      if (currentPrincipal > 0) {
+                        const finalSegmentEnd =
+                          endDate && endDate.getTime() < yearEnd.getTime()
+                            ? endDate
+                            : yearEnd;
+
+                        if (finalSegmentEnd.getTime() > yearStart.getTime()) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            currentPrincipal,
+                            rate * 100,
+                            yearStart,
+                            finalSegmentEnd
+                          );
+                          const days = diffDaysExclusive(
+                            yearStart,
+                            finalSegmentEnd
+                          );
+                          rendered.push(
+                            <View
+                              key={`int-${yearNum}-no-tx`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
+                              </Text>
+                              <Text className="text-[10px] text-muted-foreground">
+                                {`From: ${yearStart.toLocaleDateString()} → To: ${finalSegmentEnd.toLocaleDateString()}`}
+                              </Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                          currentPrincipal = res.finalPrincipal;
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            yearStart.getTime() >= finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                          }
+                        }
+                      }
+                    }
+
+                    // Render interest cells between consecutive transactions in this year
+                    for (let i = 0; i < yearTxs.length; i++) {
+                      const tx = yearTxs[i];
+                      const txDate = startOfDay(new Date(tx.date));
+
+                      // Interest from previous tx (or year start) to current tx
+                      if (i === 0 && currentPrincipal > 0) {
+                        const from = yearStart;
+                        const to = txDate;
+                        if (to.getTime() > from.getTime()) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            currentPrincipal,
+                            rate * 100,
+                            from,
+                            to
+                          );
+                          const days = diffDaysExclusive(from, to);
+                          rendered.push(
+                            <View
+                              key={`int-${yearNum}-start-${tx.id}`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
+                              </Text>
+                              <Text className="text-[10px] text-muted-foreground">
+                                {`From: ${from.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
+                              </Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                          currentPrincipal = res.finalPrincipal;
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            from.getTime() >= finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                          }
+                        }
+                      } else if (i > 0) {
+                        const prevTx = yearTxs[i - 1];
+                        const from = startOfDay(new Date(prevTx.date));
+                        const to = txDate;
+                        // currentPrincipal already includes prevTx from previous iteration
+                        // So we don't need to update it again here
+
+                        if (
+                          to.getTime() > from.getTime() &&
+                          currentPrincipal > 0
+                        ) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            currentPrincipal,
+                            rate * 100,
+                            from,
+                            to
+                          );
+                          const days = diffDaysExclusive(from, to);
+                          rendered.push(
+                            <View
+                              key={`int-${yearNum}-${i}-${tx.id}`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
+                              </Text>
+                              <Text className="text-[10px] text-muted-foreground">
+                                {`From: ${from.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
+                              </Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                          currentPrincipal = res.finalPrincipal;
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            from.getTime() >= finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                          }
+                        }
+                      }
+
+                      // Render transaction cell
+                      currentPrincipal =
+                        tx.type === "payment"
+                          ? Math.max(0, currentPrincipal - tx.amount)
+                          : currentPrincipal + tx.amount;
+
+                      // Track principal after last transaction in final year
+                      if (
+                        finalYearStart &&
+                        txDate.getTime() >= finalYearStart.getTime()
+                      ) {
+                        finalPrincipalAfterLastTx = currentPrincipal;
+                      }
+
+                      // Mark transaction as processed
+                      processedTxIds.add(tx.id);
+
+                      rendered.push(
+                        <View
+                          key={`${tx.id}-${tx.date}`}
+                          className={`mb-2 p-2 rounded ${tx.type === "payment" ? "bg-red-50 dark:bg-red-900/30" : "bg-green-50 dark:bg-green-900/30"}`}
+                        >
+                          <View className="flex-1">
+                            <Text className="text-sm font-medium">
+                              {`${tx.type === "payment" ? "-" : "+"} ₹${formatCurrency(tx.amount)}`}
+                            </Text>
+                            <Text className="text-xs text-muted-foreground">
+                              {tx.date
+                                ? new Date(tx.date).toLocaleDateString()
+                                : "N/A"}
+                            </Text>
+                          </View>
+                        </View>
                       );
                     }
-                    // If yearEnd exists, include transactions in the range [effectiveYearStart, yearEnd]
-                    return (
-                      !processedTxIds.has(t.id) &&
-                      txTime >= effectiveYearStart &&
-                      txTime <= yearEnd.getTime()
-                    );
-                  });
 
-                  // Use previous year's newPrincipal as starting principal for this year
-                  if (yearSummary) {
-                    const prevSummary = summaries.find(
-                      (s) => s.yearNumber === yearNum - 1
-                    );
-                    currentPrincipal = prevSummary
-                      ? prevSummary.newPrincipal
-                      : 0;
-                  }
-
-                  // If there's a year summary but no transactions, show interest calculation for the entire year
-                  if (yearSummary && yearTxs.length === 0 && yearEnd) {
-                    if (currentPrincipal > 0) {
+                    // Render final segment from last transaction to min(year-end, Calculate-upto)
+                    // Only if there's a year summary (yearEnd exists) and we have transactions
+                    if (yearSummary && yearTxs.length > 0 && yearEnd) {
+                      const lastTx = yearTxs[yearTxs.length - 1];
+                      const lastTxDate = startOfDay(new Date(lastTx.date));
                       const finalSegmentEnd =
                         endDate && endDate.getTime() < yearEnd.getTime()
                           ? endDate
                           : yearEnd;
 
-                      if (finalSegmentEnd.getTime() > yearStart.getTime()) {
-                        const res = calculateInterestWithAnnualCompounding(
-                          currentPrincipal,
-                          rate * 100,
-                          yearStart,
-                          finalSegmentEnd
-                        );
-                        const days = diffDaysExclusive(
-                          yearStart,
-                          finalSegmentEnd
-                        );
-                        rendered.push(
-                          <View
-                            key={`int-${yearNum}-no-tx`}
-                            className="mb-2 p-2 rounded bg-blue-50"
-                          >
-                            <Text className="text-[11px] font-semibold mb-1">
-                              {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
-                            </Text>
-                            <Text className="text-[10px] text-muted-foreground">
-                              {`From: ${yearStart.toLocaleDateString()} → To: ${finalSegmentEnd.toLocaleDateString()}`}
-                            </Text>
-                            <View className="mt-2 flex-row justify-between items-end">
-                              <View>
-                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
-                              </View>
-                              <View className="items-end">
-                                <Text className="text-[10px] text-muted-foreground">
-                                  Interest
-                                </Text>
-                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                      if (finalSegmentEnd.getTime() > lastTxDate.getTime()) {
+                        const principalAfterLastTx =
+                          lastTx.type === "payment"
+                            ? Math.max(0, currentPrincipal)
+                            : currentPrincipal;
+
+                        if (principalAfterLastTx > 0) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            principalAfterLastTx,
+                            rate * 100,
+                            lastTxDate,
+                            finalSegmentEnd
+                          );
+                          const days = diffDaysExclusive(
+                            lastTxDate,
+                            finalSegmentEnd
+                          );
+                          rendered.push(
+                            <View
+                              key={`int-${yearNum}-final`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(principalAfterLastTx)}`}
+                              </Text>
+                              <Text className="text-[10px] text-muted-foreground">
+                                {`From: ${lastTxDate.toLocaleDateString()} → To: ${finalSegmentEnd.toLocaleDateString()}`}
+                              </Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
                               </View>
                             </View>
-                          </View>
-                        );
-                        currentPrincipal = res.finalPrincipal;
-                        // Track interest for final year
-                        if (
-                          finalYearStart &&
-                          yearStart.getTime() >= finalYearStart.getTime()
-                        ) {
-                          finalYearInterestForTotal += res.interest;
+                          );
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            lastTxDate.getTime() >= finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                          }
                         }
                       }
                     }
-                  }
-
-                  // Render interest cells between consecutive transactions in this year
-                  for (let i = 0; i < yearTxs.length; i++) {
-                    const tx = yearTxs[i];
-                    const txDate = startOfDay(new Date(tx.date));
-
-                    // Interest from previous tx (or year start) to current tx
-                    if (i === 0 && currentPrincipal > 0) {
-                      const from = yearStart;
-                      const to = txDate;
-                      if (to.getTime() > from.getTime()) {
-                        const res = calculateInterestWithAnnualCompounding(
-                          currentPrincipal,
-                          rate * 100,
-                          from,
-                          to
-                        );
-                        const days = diffDaysExclusive(from, to);
-                        rendered.push(
-                          <View
-                            key={`int-${yearNum}-start-${tx.id}`}
-                            className="mb-2 p-2 rounded bg-blue-50"
-                          >
-                            <Text className="text-[11px] font-semibold mb-1">
-                              {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
-                            </Text>
-                            <Text className="text-[10px] text-muted-foreground">
-                              {`From: ${from.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
-                            </Text>
-                            <View className="mt-2 flex-row justify-between items-end">
-                              <View>
-                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
-                              </View>
-                              <View className="items-end">
-                                <Text className="text-[10px] text-muted-foreground">
-                                  Interest
-                                </Text>
-                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
-                              </View>
-                            </View>
-                          </View>
-                        );
-                        currentPrincipal = res.finalPrincipal;
-                        // Track interest for final year
-                        if (
-                          finalYearStart &&
-                          from.getTime() >= finalYearStart.getTime()
-                        ) {
-                          finalYearInterestForTotal += res.interest;
-                        }
-                      }
-                    } else if (i > 0) {
-                      const prevTx = yearTxs[i - 1];
-                      const from = startOfDay(new Date(prevTx.date));
-                      const to = txDate;
-                      // currentPrincipal already includes prevTx from previous iteration
-                      // So we don't need to update it again here
-
-                      if (
-                        to.getTime() > from.getTime() &&
-                        currentPrincipal > 0
-                      ) {
-                        const res = calculateInterestWithAnnualCompounding(
-                          currentPrincipal,
-                          rate * 100,
-                          from,
-                          to
-                        );
-                        const days = diffDaysExclusive(from, to);
-                        rendered.push(
-                          <View
-                            key={`int-${yearNum}-${i}-${tx.id}`}
-                            className="mb-2 p-2 rounded bg-blue-50"
-                          >
-                            <Text className="text-[11px] font-semibold mb-1">
-                              {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
-                            </Text>
-                            <Text className="text-[10px] text-muted-foreground">
-                              {`From: ${from.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
-                            </Text>
-                            <View className="mt-2 flex-row justify-between items-end">
-                              <View>
-                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
-                              </View>
-                              <View className="items-end">
-                                <Text className="text-[10px] text-muted-foreground">
-                                  Interest
-                                </Text>
-                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
-                              </View>
-                            </View>
-                          </View>
-                        );
-                        currentPrincipal = res.finalPrincipal;
-                        // Track interest for final year
-                        if (
-                          finalYearStart &&
-                          from.getTime() >= finalYearStart.getTime()
-                        ) {
-                          finalYearInterestForTotal += res.interest;
-                        }
-                      }
-                    }
-
-                    // Render transaction cell
-                    currentPrincipal =
-                      tx.type === "payment"
-                        ? Math.max(0, currentPrincipal - tx.amount)
-                        : currentPrincipal + tx.amount;
-
-                    // Track principal after last transaction in final year
-                    if (
-                      finalYearStart &&
-                      txDate.getTime() >= finalYearStart.getTime()
-                    ) {
-                      finalPrincipalAfterLastTx = currentPrincipal;
-                    }
-
-                    // Mark transaction as processed
-                    processedTxIds.add(tx.id);
-
-                    rendered.push(
-                      <View
-                        key={`${tx.id}-${tx.date}`}
-                        className={`mb-2 p-2 rounded relative ${tx.type === "payment" ? "bg-red-50" : "bg-green-50"}`}
-                      >
+                    if (yearSummary) {
+                      rendered.push(
                         <View
-                          className="absolute top-2 right-2 flex-row z-10"
-                          pointerEvents="box-none"
+                          key={`ys-${yearSummary.yearNumber}-${yearSummary.toDate}`}
+                          className="mb-3 p-2 rounded bg-yellow-50 dark:bg-yellow-900/30"
                         >
-                          {tx.type === "payment" ? (
-                            <>
-                              <Button
-                                variant="outline"
-                                className="h-7 w-7 rounded-full p-0 mr-1 bg-white border-blue-600 items-center justify-center"
-                                onPress={() => handleEditPayment(tx)}
-                                hitSlop={{
-                                  top: 8,
-                                  bottom: 8,
-                                  left: 8,
-                                  right: 8,
-                                }}
-                              >
-                                <MaterialIcons
-                                  name="edit"
-                                  size={14}
-                                  color="#2563eb"
-                                />
-                              </Button>
-                              <Button
-                                variant="destructive"
-                                className="h-7 w-7 rounded-full p-0 bg-red-600 items-center justify-center"
-                                onPress={() => handleDeletePayment(tx.id)}
-                                hitSlop={{
-                                  top: 8,
-                                  bottom: 8,
-                                  left: 8,
-                                  right: 8,
-                                }}
-                              >
-                                <MaterialIcons
-                                  name="delete"
-                                  size={14}
-                                  color="#ffffff"
-                                />
-                              </Button>
-                            </>
-                          ) : (
-                            <>
-                              <Button
-                                variant="outline"
-                                className="h-7 w-7 rounded-full p-0 mr-1 bg-white border-blue-600 items-center justify-center"
-                                onPress={() => handleEditReceipt(tx)}
-                                hitSlop={{
-                                  top: 8,
-                                  bottom: 8,
-                                  left: 8,
-                                  right: 8,
-                                }}
-                              >
-                                <MaterialIcons
-                                  name="edit"
-                                  size={14}
-                                  color="#2563eb"
-                                />
-                              </Button>
-                              <Button
-                                variant="destructive"
-                                className="h-7 w-7 rounded-full p-0 bg-red-600 items-center justify-center"
-                                onPress={() => handleDeleteReceipt(tx.id)}
-                                hitSlop={{
-                                  top: 8,
-                                  bottom: 8,
-                                  left: 8,
-                                  right: 8,
-                                }}
-                              >
-                                <MaterialIcons
-                                  name="delete"
-                                  size={14}
-                                  color="#ffffff"
-                                />
-                              </Button>
-                            </>
-                          )}
-                        </View>
-                        <View className="flex-1">
-                          <Text className="text-sm font-medium">
-                            {`${tx.type === "payment" ? "-" : "+"} ₹${formatCurrency(tx.amount)}`}
-                          </Text>
-                          <Text className="text-xs text-muted-foreground">
-                            {tx.date
-                              ? new Date(tx.date).toLocaleDateString()
-                              : "N/A"}
-                          </Text>
-                        </View>
-                      </View>
-                    );
-                  }
-
-                  // Render final segment from last transaction to min(year-end, Calculate-upto)
-                  // Only if there's a year summary (yearEnd exists) and we have transactions
-                  if (yearSummary && yearTxs.length > 0 && yearEnd) {
-                    const lastTx = yearTxs[yearTxs.length - 1];
-                    const lastTxDate = startOfDay(new Date(lastTx.date));
-                    const finalSegmentEnd =
-                      endDate && endDate.getTime() < yearEnd.getTime()
-                        ? endDate
-                        : yearEnd;
-
-                    if (finalSegmentEnd.getTime() > lastTxDate.getTime()) {
-                      const principalAfterLastTx =
-                        lastTx.type === "payment"
-                          ? Math.max(0, currentPrincipal)
-                          : currentPrincipal;
-
-                      if (principalAfterLastTx > 0) {
-                        const res = calculateInterestWithAnnualCompounding(
-                          principalAfterLastTx,
-                          rate * 100,
-                          lastTxDate,
-                          finalSegmentEnd
-                        );
-                        const days = diffDaysExclusive(
-                          lastTxDate,
-                          finalSegmentEnd
-                        );
-                        rendered.push(
-                          <View
-                            key={`int-${yearNum}-final`}
-                            className="mb-2 p-2 rounded bg-blue-50"
-                          >
-                            <Text className="text-[11px] font-semibold mb-1">
-                              {`Current Principal: ₹${formatCurrency(principalAfterLastTx)}`}
-                            </Text>
-                            <Text className="text-[10px] text-muted-foreground">
-                              {`From: ${lastTxDate.toLocaleDateString()} → To: ${finalSegmentEnd.toLocaleDateString()}`}
-                            </Text>
-                            <View className="mt-2 flex-row justify-between items-end">
+                          <Text className="text-xs font-bold">{`Year ${yearSummary.yearNumber} Summary`}</Text>
+                          <View className="mt-2 pt-2 border-t border-yellow-200 dark:border-yellow-800">
+                            <View className="flex-row justify-between items-end">
                               <View>
-                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                <Text className="text-[10px] text-muted-foreground">
+                                  {`From: ${new Date(yearSummary.fromDate).toLocaleDateString()} → To: ${new Date(yearSummary.toDate).toLocaleDateString()}`}
+                                </Text>
+                                <Text className="text-xs text-muted-foreground">
+                                  {`Current Year's Interest: ₹${formatCurrency(yearSummary.interest)}`}
+                                </Text>
                               </View>
                               <View className="items-end">
                                 <Text className="text-[10px] text-muted-foreground">
-                                  Interest
+                                  New Principal
                                 </Text>
-                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                <Text className="text-xs font-bold">{`₹${formatCurrency(yearSummary.newPrincipal)}`}</Text>
                               </View>
                             </View>
                           </View>
-                        );
-                        // Track interest for final year
-                        if (
-                          finalYearStart &&
-                          lastTxDate.getTime() >= finalYearStart.getTime()
-                        ) {
-                          finalYearInterestForTotal += res.interest;
+                        </View>
+                      );
+                      currentPrincipal = yearSummary.newPrincipal;
+                    }
+
+                    // Check if we should stop (no more summaries or reached end date)
+                    const shouldStop =
+                      !yearSummary ||
+                      !endDate ||
+                      (yearEnd && yearEnd.getTime() >= endDate.getTime());
+
+                    // If no year summary but we have transactions and endDate is after last transaction
+                    if (!yearSummary && yearTxs.length > 0 && endDate) {
+                      const lastTxInYear = yearTxs[yearTxs.length - 1];
+                      const lastTxDateInYear = startOfDay(
+                        new Date(lastTxInYear.date)
+                      );
+                      if (endDate.getTime() > lastTxDateInYear.getTime()) {
+                        // Calculate final segment from last transaction to endDate
+                        const principalAfterLastTxInYear =
+                          lastTxInYear.type === "payment"
+                            ? Math.max(0, currentPrincipal)
+                            : currentPrincipal;
+
+                        if (principalAfterLastTxInYear > 0) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            principalAfterLastTxInYear,
+                            rate * 100,
+                            lastTxDateInYear,
+                            endDate
+                          );
+                          const days = diffDaysExclusive(
+                            lastTxDateInYear,
+                            endDate
+                          );
+                          rendered.push(
+                            <View
+                              key={`final-no-summary-${yearNum}`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(principalAfterLastTxInYear)}`}
+                              </Text>
+                              <Text className="text-[10px] text-muted-foreground">
+                                {`From: ${lastTxDateInYear.toLocaleDateString()} → To: ${endDate.toLocaleDateString()}`}
+                              </Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            lastTxDateInYear.getTime() >=
+                              finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                          }
                         }
+                        // Stop after this since we've reached endDate
+                        break;
                       }
                     }
+
+                    if (shouldStop) break;
                   }
-                  if (yearSummary) {
-                    rendered.push(
-                      <View
-                        key={`ys-${yearSummary.yearNumber}-${yearSummary.toDate}`}
-                        className="mb-3 p-2 rounded bg-yellow-50"
-                      >
-                        <Text className="text-xs font-bold">{`Year ${yearSummary.yearNumber} Summary`}</Text>
-                        <View className="mt-2 pt-2 border-t border-yellow-200">
-                          <View className="flex-row justify-between items-end">
-                            <View>
+
+                  // Render final partial period after last year summary
+                  // ONLY if there are NO transactions between the last summary's toDate and endDate
+                  // If there are transactions, they should have already been processed in the year loop
+                  const lastSummary =
+                    summaries.length > 0
+                      ? summaries[summaries.length - 1]
+                      : null;
+                  if (lastSummary && endDate) {
+                    const finalStart = startOfDay(new Date(lastSummary.toDate));
+                    if (endDate.getTime() > finalStart.getTime()) {
+                      // Check if there are any transactions between finalStart and endDate
+                      const transactionsAfterSummary = combined.filter((t) => {
+                        const txDate = startOfDay(new Date(t.date));
+                        return (
+                          txDate.getTime() > finalStart.getTime() &&
+                          txDate.getTime() <= endDate.getTime()
+                        );
+                      });
+
+                      // Only render final period if there are NO transactions after the summary
+                      // AND the endDate is after the finalStart
+                      if (transactionsAfterSummary.length === 0) {
+                        const principalBeforeFinal = Math.max(
+                          0,
+                          lastSummary.newPrincipal
+                        );
+                        if (principalBeforeFinal > 0) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            principalBeforeFinal,
+                            rate * 100,
+                            finalStart,
+                            endDate
+                          );
+                          const days = diffDaysExclusive(finalStart, endDate);
+                          rendered.push(
+                            <View
+                              key={`final-partial-${lastSummary.yearNumber}`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(principalBeforeFinal)}`}
+                              </Text>
                               <Text className="text-[10px] text-muted-foreground">
-                                {`From: ${new Date(yearSummary.fromDate).toLocaleDateString()} → To: ${new Date(yearSummary.toDate).toLocaleDateString()}`}
+                                {`From: ${finalStart.toLocaleDateString()} → To: ${endDate.toLocaleDateString()}`}
                               </Text>
-                              <Text className="text-xs text-muted-foreground">
-                                {`Current Year's Interest: ₹${formatCurrency(yearSummary.interest)}`}
-                              </Text>
-                            </View>
-                            <View className="items-end">
-                              <Text className="text-[10px] text-muted-foreground">
-                                New Principal
-                              </Text>
-                              <Text className="text-xs font-bold">{`₹${formatCurrency(yearSummary.newPrincipal)}`}</Text>
-                            </View>
-                          </View>
-                        </View>
-                      </View>
-                    );
-                    currentPrincipal = yearSummary.newPrincipal;
-                  }
-
-                  // Check if we should stop (no more summaries or reached end date)
-                  const shouldStop =
-                    !yearSummary ||
-                    !endDate ||
-                    (yearEnd && yearEnd.getTime() >= endDate.getTime());
-
-                  // If no year summary but we have transactions and endDate is after last transaction
-                  if (!yearSummary && yearTxs.length > 0 && endDate) {
-                    const lastTxInYear = yearTxs[yearTxs.length - 1];
-                    const lastTxDateInYear = startOfDay(
-                      new Date(lastTxInYear.date)
-                    );
-                    if (endDate.getTime() > lastTxDateInYear.getTime()) {
-                      // Calculate final segment from last transaction to endDate
-                      const principalAfterLastTxInYear =
-                        lastTxInYear.type === "payment"
-                          ? Math.max(0, currentPrincipal)
-                          : currentPrincipal;
-
-                      if (principalAfterLastTxInYear > 0) {
-                        const res = calculateInterestWithAnnualCompounding(
-                          principalAfterLastTxInYear,
-                          rate * 100,
-                          lastTxDateInYear,
-                          endDate
-                        );
-                        const days = diffDaysExclusive(
-                          lastTxDateInYear,
-                          endDate
-                        );
-                        rendered.push(
-                          <View
-                            key={`final-no-summary-${yearNum}`}
-                            className="mb-2 p-2 rounded bg-blue-50"
-                          >
-                            <Text className="text-[11px] font-semibold mb-1">
-                              {`Current Principal: ₹${formatCurrency(principalAfterLastTxInYear)}`}
-                            </Text>
-                            <Text className="text-[10px] text-muted-foreground">
-                              {`From: ${lastTxDateInYear.toLocaleDateString()} → To: ${endDate.toLocaleDateString()}`}
-                            </Text>
-                            <View className="mt-2 flex-row justify-between items-end">
-                              <View>
-                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
-                              </View>
-                              <View className="items-end">
-                                <Text className="text-[10px] text-muted-foreground">
-                                  Interest
-                                </Text>
-                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
                               </View>
                             </View>
-                          </View>
-                        );
-                        // Track interest for final year
-                        if (
-                          finalYearStart &&
-                          lastTxDateInYear.getTime() >= finalYearStart.getTime()
-                        ) {
-                          finalYearInterestForTotal += res.interest;
-                        }
-                      }
-                      // Stop after this since we've reached endDate
-                      break;
-                    }
-                  }
-
-                  if (shouldStop) break;
-                }
-
-                // Render final partial period after last year summary
-                // ONLY if there are NO transactions between the last summary's toDate and endDate
-                // If there are transactions, they should have already been processed in the year loop
-                const lastSummary =
-                  summaries.length > 0 ? summaries[summaries.length - 1] : null;
-                if (lastSummary && endDate) {
-                  const finalStart = startOfDay(new Date(lastSummary.toDate));
-                  if (endDate.getTime() > finalStart.getTime()) {
-                    // Check if there are any transactions between finalStart and endDate
-                    const transactionsAfterSummary = combined.filter((t) => {
-                      const txDate = startOfDay(new Date(t.date));
-                      return (
-                        txDate.getTime() > finalStart.getTime() &&
-                        txDate.getTime() <= endDate.getTime()
-                      );
-                    });
-
-                    // Only render final period if there are NO transactions after the summary
-                    // AND the endDate is after the finalStart
-                    if (transactionsAfterSummary.length === 0) {
-                      const principalBeforeFinal = Math.max(
-                        0,
-                        lastSummary.newPrincipal
-                      );
-                      if (principalBeforeFinal > 0) {
-                        const res = calculateInterestWithAnnualCompounding(
-                          principalBeforeFinal,
-                          rate * 100,
-                          finalStart,
-                          endDate
-                        );
-                        const days = diffDaysExclusive(finalStart, endDate);
-                        rendered.push(
-                          <View
-                            key={`final-partial-${lastSummary.yearNumber}`}
-                            className="mb-2 p-2 rounded bg-blue-50"
-                          >
-                            <Text className="text-[11px] font-semibold mb-1">
-                              {`Current Principal: ₹${formatCurrency(principalBeforeFinal)}`}
-                            </Text>
-                            <Text className="text-[10px] text-muted-foreground">
-                              {`From: ${finalStart.toLocaleDateString()} → To: ${endDate.toLocaleDateString()}`}
-                            </Text>
-                            <View className="mt-2 flex-row justify-between items-end">
-                              <View>
-                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
-                              </View>
-                              <View className="items-end">
-                                <Text className="text-[10px] text-muted-foreground">
-                                  Interest
-                                </Text>
-                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
-                              </View>
-                            </View>
-                          </View>
-                        );
-                        // Track interest for final year
-                        if (
-                          finalYearStart &&
-                          finalStart.getTime() >= finalYearStart.getTime()
-                        ) {
-                          finalYearInterestForTotal += res.interest;
-                          // If no transactions after summary, principal after last transaction is the principal before final
-                          if (finalPrincipalAfterLastTx === 0) {
-                            finalPrincipalAfterLastTx = principalBeforeFinal;
+                          );
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            finalStart.getTime() >= finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                            // If no transactions after summary, principal after last transaction is the principal before final
+                            if (finalPrincipalAfterLastTx === 0) {
+                              finalPrincipalAfterLastTx = principalBeforeFinal;
+                            }
                           }
                         }
                       }
                     }
                   }
-                }
 
-                // Track final principal and final year interest for total amount due cell
-                // Current Principal = Principal after last transaction in final year
-                const finalPrincipalForDisplay =
-                  hasCalculated && calculatedAmount > 0
-                    ? finalPrincipalAfterLastTx > 0
-                      ? finalPrincipalAfterLastTx
-                      : finalYearInterestForTotal > 0
-                        ? calculatedAmount - finalYearInterestForTotal
-                        : calculatedAmount
-                    : 0;
+                  // Track final principal and final year interest for total amount due cell
+                  // Current Principal = Principal after last transaction in final year
+                  const finalPrincipalForDisplay =
+                    hasCalculated &&
+                    calculationSuccessful &&
+                    calculatedAmount > 0
+                      ? finalPrincipalAfterLastTx > 0
+                        ? finalPrincipalAfterLastTx
+                        : finalYearInterestForTotal > 0
+                          ? calculatedAmount - finalYearInterestForTotal
+                          : calculatedAmount
+                      : 0;
 
-                // Old duplicate code removed - new year-cycle-based rendering above handles everything
+                  // Old duplicate code removed - new year-cycle-based rendering above handles everything
 
-                // Add Total Amount Due cell at the bottom
-                if (hasCalculated && calculatedAmount > 0) {
-                  rendered.push(
-                    <View
-                      key="total-amount-due"
-                      className="mb-2 rounded bg-purple-50 border-2 border-purple-200"
-                      style={{ padding: 12 }}
-                    >
-                      <Text className="text-sm font-bold mb-3">
-                        Total Amount Due
-                      </Text>
+                  // Add Total Amount Due cell at the bottom
+                  if (
+                    hasCalculated &&
+                    calculationSuccessful &&
+                    calculatedAmount > 0
+                  ) {
+                    rendered.push(
                       <View
-                        style={{
-                          flexDirection: "row",
-                          alignItems: "center",
-                          flexWrap: "wrap",
-                          gap: 4,
-                        }}
+                        key="total-amount-due"
+                        className="mb-2 rounded bg-purple-50 dark:bg-purple-900/30 border-2 border-purple-200 dark:border-purple-800"
+                        style={{ padding: 12 }}
                       >
-                        <View
-                          style={{ flex: 1, minWidth: 65, maxWidth: "30%" }}
-                        >
-                          <Text className="text-[10px] text-muted-foreground">
-                            Current Principal
-                          </Text>
-                          <Text
-                            className="text-xs font-semibold"
-                            numberOfLines={1}
-                            ellipsizeMode="tail"
-                          >
-                            {`₹${formatCurrency(finalPrincipalForDisplay)}`}
-                          </Text>
-                        </View>
-                        <Text
-                          className="text-sm font-bold"
-                          style={{ marginHorizontal: 2 }}
-                        >
-                          +
-                        </Text>
-                        <View
-                          style={{ flex: 1, minWidth: 65, maxWidth: "30%" }}
-                        >
-                          <Text className="text-[10px] text-muted-foreground">
-                            Final Year&apos;s Interest
-                          </Text>
-                          <Text
-                            className="text-xs font-semibold"
-                            numberOfLines={1}
-                            ellipsizeMode="tail"
-                          >
-                            {`₹${formatCurrency(finalYearInterestForTotal)}`}
-                          </Text>
-                        </View>
-                        <Text
-                          className="text-sm font-bold"
-                          style={{ marginHorizontal: 2 }}
-                        >
-                          =
+                        <Text className="text-sm font-bold mb-3">
+                          Total Amount Due
                         </Text>
                         <View
                           style={{
-                            flex: 1,
-                            minWidth: 65,
-                            maxWidth: "30%",
-                            alignItems: "flex-end",
+                            flexDirection: "row",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                            gap: 4,
                           }}
                         >
-                          <Text className="text-[10px] text-muted-foreground">
-                            Total
-                          </Text>
-                          <Text
-                            className="text-xs font-bold"
-                            numberOfLines={1}
-                            ellipsizeMode="tail"
+                          <View
+                            style={{ flex: 1, minWidth: 65, maxWidth: "30%" }}
                           >
-                            {`₹${formatCurrency(calculatedAmount)}`}
+                            <Text className="text-[10px] text-muted-foreground">
+                              Current Principal
+                            </Text>
+                            <Text
+                              className="text-xs font-semibold"
+                              numberOfLines={1}
+                              ellipsizeMode="tail"
+                            >
+                              {`₹${formatCurrency(finalPrincipalForDisplay)}`}
+                            </Text>
+                          </View>
+                          <Text
+                            className="text-sm font-bold"
+                            style={{ marginHorizontal: 2 }}
+                          >
+                            +
                           </Text>
+                          <View
+                            style={{ flex: 1, minWidth: 65, maxWidth: "30%" }}
+                          >
+                            <Text className="text-[10px] text-muted-foreground">
+                              Final Year&apos;s Interest
+                            </Text>
+                            <Text
+                              className="text-xs font-semibold"
+                              numberOfLines={1}
+                              ellipsizeMode="tail"
+                            >
+                              {`₹${formatCurrency(finalYearInterestForTotal)}`}
+                            </Text>
+                          </View>
+                          <Text
+                            className="text-sm font-bold"
+                            style={{ marginHorizontal: 2 }}
+                          >
+                            =
+                          </Text>
+                          <View
+                            style={{
+                              flex: 1,
+                              minWidth: 65,
+                              maxWidth: "30%",
+                              alignItems: "flex-end",
+                            }}
+                          >
+                            <Text className="text-[10px] text-muted-foreground">
+                              Total
+                            </Text>
+                            <Text
+                              className="text-xs font-bold"
+                              numberOfLines={1}
+                              ellipsizeMode="tail"
+                            >
+                              {`₹${formatCurrency(calculatedAmount)}`}
+                            </Text>
+                          </View>
                         </View>
                       </View>
-                    </View>
-                  );
-                }
+                    );
+                  }
 
-                return rendered;
-              })()}
+                  return rendered;
+                })()}
+              </View>
             </View>
-          </View>
-        ) : null}
+          ) : null}
 
-        {/* Last transaction in separate cell removed; all transactions render in the combined list */}
-        {/* Final partial period calculation is now handled in the main rendering loop above */}
+          {/* Last transaction in separate cell removed; all transactions render in the combined list */}
+          {/* Final partial period calculation is now handled in the main rendering loop above */}
 
-        {/* Final period separate transaction-like cell is rendered in the Annual and final segments section above */}
+          {/* Final period separate transaction-like cell is rendered in the Annual and final segments section above */}
 
-        {/* Export to PDF Button at bottom */}
-        {hasCalculated &&
-          (combinedTransactions.length > 0 || calculatedAmount > 0) && (
-            <View className="mb-6">
-              <Button className="bg-purple-600 mt-3" onPress={exportToPDF}>
-                <View className="flex-row items-center justify-center">
-                  <MaterialIcons
-                    name="picture-as-pdf"
-                    size={18}
-                    color="#ffffff"
-                    style={{ marginRight: 8 }}
-                  />
-                  <Text className="text-white">Export to PDF</Text>
-                </View>
-              </Button>
-            </View>
-          )}
-      </ScrollView>
-
-      {/* Action Buttons moved to top - removed bottom bar */}
+          {/* Export to PDF Button at bottom */}
+          {hasCalculated &&
+            calculationSuccessful &&
+            (combinedTransactions.length > 0 || calculatedAmount > 0) && (
+              <View className="mb-6">
+                <Button className="bg-purple-600 mt-3" onPress={exportToPDF}>
+                  <View className="flex-row items-center justify-center">
+                    <MaterialIcons
+                      name="picture-as-pdf"
+                      size={18}
+                      color="#ffffff"
+                      style={{ marginRight: 8 }}
+                    />
+                    <Text className="text-white">Export to PDF</Text>
+                  </View>
+                </Button>
+              </View>
+            )}
+        </ScrollView>
+      </View>
 
       {/* Payment Modal */}
       <Modal
@@ -2512,7 +2622,13 @@ export default function Index() {
             <Button
               variant="outline"
               onPress={() => setShowPaymentDatePicker(true)}
+              className="flex-row items-center gap-2"
             >
+              <MaterialIcons
+                name="calendar-today"
+                size={18}
+                color={colorScheme === "dark" ? "#fff" : "#000"}
+              />
               <Text>
                 {paymentDate
                   ? new Date(paymentDate).toLocaleDateString()
@@ -2536,12 +2652,11 @@ export default function Index() {
             )}
           </View>
           <Button
-            variant="default"
-            className="mt-6"
+            className="bg-green-600 mt-6"
             onPress={handlePaymentSubmit}
             disabled={!paymentAmount || parseFloat(paymentAmount) <= 0}
           >
-            <Text>
+            <Text className="text-white">
               {editingPaymentId ? "Update repayment" : "Add repayment"}
             </Text>
           </Button>
@@ -2573,7 +2688,13 @@ export default function Index() {
             <Button
               variant="outline"
               onPress={() => setShowReceiptDatePicker(true)}
+              className="flex-row items-center gap-2"
             >
+              <MaterialIcons
+                name="calendar-today"
+                size={18}
+                color={colorScheme === "dark" ? "#fff" : "#000"}
+              />
               <Text>
                 {receiptDate
                   ? new Date(receiptDate).toLocaleDateString()
@@ -2597,12 +2718,13 @@ export default function Index() {
             )}
           </View>
           <Button
-            variant="default"
-            className="mt-6"
+            className="bg-red-600 mt-6"
             onPress={handleReceiptSubmit}
             disabled={!receiptAmount || parseFloat(receiptAmount) <= 0}
           >
-            <Text>{editingReceiptId ? "Update borrowal" : "Add borrowal"}</Text>
+            <Text className="text-white">
+              {editingReceiptId ? "Update borrowal" : "Add borrowal"}
+            </Text>
           </Button>
         </View>
       </Modal>

@@ -1,4 +1,5 @@
 import { THEME } from "@/lib/theme";
+import { useTheme } from "@/lib/theme-context";
 import React from "react";
 import {
   Keyboard,
@@ -20,7 +21,8 @@ export interface ModalProps {
 }
 
 const ModalComponent = ({ visible, onClose, title, children }: ModalProps) => {
-  const theme = THEME.light;
+  const { colorScheme } = useTheme();
+  const theme = colorScheme === "dark" ? THEME.dark : THEME.light;
 
   const handleBackdropPress = () => {
     Keyboard.dismiss();
@@ -35,7 +37,10 @@ const ModalComponent = ({ visible, onClose, title, children }: ModalProps) => {
       onRequestClose={onClose}
     >
       <Pressable
-        style={{ flex: 1, backgroundColor: "rgba(0, 0, 0, 0.5)" }}
+        style={{ 
+          flex: 1, 
+          backgroundColor: colorScheme === "dark" ? "rgba(0, 0, 0, 0.8)" : "rgba(0, 0, 0, 0.5)" 
+        }}
         onPress={handleBackdropPress}
       >
         <KeyboardAvoidingView
@@ -44,6 +49,7 @@ const ModalComponent = ({ visible, onClose, title, children }: ModalProps) => {
           keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
         >
           <Pressable
+            className={colorScheme === "dark" ? "dark" : ""}
             style={{
               backgroundColor: theme.background,
               borderTopLeftRadius: 24,

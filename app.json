@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "money-lender",
-    "slug": "money-lender",
+    "name": "money-lender's-calculator",
+    "slug": "money-lenders-calculator",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -15,14 +15,14 @@
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/icon.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.chaitu5981.moneylender",
-      "userInterfaceStyle": "light"
+      "userInterfaceStyle": "light",
+      "versionCode": 1,
+      "permissions": []
     },
     "web": {
       "output": "static",
@@ -47,6 +47,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "cd6d82c7-e21d-482b-a634-d2a4b6c4ee94"
+      }
+    },
+    "owner": "chaitu5981"
   }
 }

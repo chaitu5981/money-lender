@@ -68,11 +68,13 @@ function Text({
   className,
   asChild = false,
   variant = 'default',
+  allowFontScaling = false,
   ...props
 }: React.ComponentProps<typeof RNText> &
   TextVariantProps &
   React.RefAttributes<RNText> & {
     asChild?: boolean;
+    allowFontScaling?: boolean;
   }) {
   const textClass = React.useContext(TextClassContext);
   const Component = asChild ? Slot.Text : RNText;
@@ -81,6 +83,7 @@ function Text({
       className={cn(textVariants({ variant }), textClass, className)}
       role={variant ? ROLE[variant] : undefined}
       aria-level={variant ? ARIA_LEVEL[variant] : undefined}
+      allowFontScaling={allowFontScaling}
       {...props}
     />
   );
