@@ -1,0 +1,12 @@
+# EAS Build will ignore these files during builds
+# This ensures expo-dev-client in devDependencies doesn't affect production builds
+
+# Development files
+.expo/
+.expo-shared/
+node_modules/.cache/
+
+# Local development
+*.log
+.DS_Store
+

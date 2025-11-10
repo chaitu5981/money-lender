@@ -99,9 +99,13 @@ export default function Index() {
   const [editingReceiptId, setEditingReceiptId] = useState<string | null>(null);
 
   // Results
-  const [calculatedInterest, setCalculatedInterest] = useState<number>(0);
+  const [calculatedInterest, setCalculatedInterest] = useState<number>(0); // Interest for "Total Amount Due" section
+  const [calculatedResultsInterest, setCalculatedResultsInterest] =
+    useState<number>(0); // Interest for "Calculated Results" section (Total Amount Due - Outstanding Principal)
   const [calculatedAmount, setCalculatedAmount] = useState<number>(0);
-  const [loanAmount, setLoanAmount] = useState<number>(0);
+  const [loanAmount, setLoanAmount] = useState<number>(0); // Outstanding principal (total borrowals - total repayments) for "Calculated Results"
+  const [currentPrincipalForTotal, setCurrentPrincipalForTotal] =
+    useState<number>(0); // Principal from last cell for "Total Amount Due"
   const [calculationDetails, setCalculationDetails] = useState<string>("");
   const [hasCalculated, setHasCalculated] = useState<boolean>(false);
   const [calculationSuccessful, setCalculationSuccessful] =
@@ -208,8 +212,10 @@ export default function Index() {
               setTransactionPeriods([]);
               setYearSummaries([]);
               setCalculatedInterest(0);
+              setCalculatedResultsInterest(0);
               setCalculatedAmount(0);
               setLoanAmount(0);
+              setCurrentPrincipalForTotal(0);
               setCalculationDetails("");
               setCalculationEndDate(null);
               setHasCalculated(false);
@@ -537,8 +543,10 @@ export default function Index() {
     (currentPayments: Transaction[], currentReceipts: Transaction[]) => {
       if (!interestRate || parseFloat(interestRate) <= 0) {
         setCalculatedInterest(0);
+        setCalculatedResultsInterest(0);
         setCalculatedAmount(0);
         setLoanAmount(0);
+        setCurrentPrincipalForTotal(0);
         return;
       }
 
@@ -745,14 +753,67 @@ export default function Index() {
                     ? Math.max(0, principalBeforeFinalSegment - t.amount)
                     : principalBeforeFinalSegment + t.amount;
               }
+
+              // Year summary interest should be the sum of ALL interest periods in this year
+              // Recalculate to ensure it matches what's displayed in cells
+              // Start from previous year's new principal and calculate all interest periods in this year
+              let recalculatedTotalInterest = 0;
+              let calcPrincipal = prevSummary ? prevSummary.newPrincipal : 0;
+              let lastCalcDate = currentYearStart;
+
+              // Process all transactions and calculate interest for each period
+              for (const t of yearTxsForPrincipal) {
+                const txDate = startOfDay(new Date(t.date));
+                if (
+                  calcPrincipal > 0 &&
+                  lastCalcDate.getTime() < txDate.getTime()
+                ) {
+                  const res = calculateInterestWithAnnualCompounding(
+                    calcPrincipal,
+                    rate * 100,
+                    lastCalcDate,
+                    txDate
+                  );
+                  recalculatedTotalInterest += res.interest;
+                  calcPrincipal = res.finalPrincipal;
+                }
+                // Apply transaction
+                calcPrincipal =
+                  t.type === "payment"
+                    ? Math.max(0, calcPrincipal - t.amount)
+                    : calcPrincipal + t.amount;
+                lastCalcDate = txDate;
+              }
+
+              // Calculate final segment interest
+              if (
+                calcPrincipal > 0 &&
+                lastCalcDate.getTime() < startOfDay(event.date).getTime()
+              ) {
+                const finalRes = calculateInterestWithAnnualCompounding(
+                  calcPrincipal,
+                  rate * 100,
+                  lastCalcDate,
+                  startOfDay(event.date)
+                );
+                recalculatedTotalInterest += finalRes.interest;
+                // Update segmentInterest to match the recalculated value
+                segmentInterest = finalRes.interest;
+              }
+
+              const totalYearInterest = recalculatedTotalInterest;
+
+              // New Principal = Current Principal of last cell + Total Interest of the year
+              // Current Principal of last cell = principalBeforeFinalSegment (before final segment interest is added)
+              // So: New Principal = principalBeforeFinalSegment + totalYearInterest
               const newPrincipalManual =
-                principalBeforeFinalSegment + yearAccrued;
+                principalBeforeFinalSegment + totalYearInterest;
 
               summaries.push({
                 yearNumber,
                 fromDate: currentYearStart.toISOString(),
                 toDate: event.date.toISOString(),
-                interest: yearAccrued,
+                interest: totalYearInterest, // Sum of all interest cells in this year
                 newPrincipal: newPrincipalManual,
                 // extra fields for rendering final segment cell
                 finalFromDate: (segmentFrom ?? currentYearStart).toISOString(),
@@ -864,9 +925,121 @@ export default function Index() {
           allYear1Interest + Math.max(0, finalPeriodInterest || 0);
       }
 
-      // Calculate total amount due: Outstanding Principal + Interest
-      // Use actual outstanding principal (can be negative), not the clamped principalBeforeLastCell
-      const totalAmountDue = outstandingPrincipal + finalYearInterestSum;
+      // Determine the current principal from the last displayed cell
+      // If last cell is a year summary (and no transactions after it), use summary's newPrincipal
+      // Otherwise, calculate principal after last transaction (without interest)
+      let currentPrincipalForDisplay = outstandingPrincipal;
+      let recalculatedFinalYearInterest = finalYearInterestSum;
+
+      if (lastSummaryForTotal) {
+        const lastSummaryDate = startOfDay(
+          new Date(lastSummaryForTotal.toDate)
+        );
+        const endDate = calculationEndDate
+          ? startOfDay(new Date(calculationEndDate))
+          : startOfDay(new Date());
+
+        // Check if there are transactions after the last summary
+        const transactionsAfterSummary = allTransactions.filter((t) => {
+          const txDate = startOfDay(new Date(t.date));
+          return (
+            txDate.getTime() > lastSummaryDate.getTime() &&
+            txDate.getTime() <= endDate.getTime()
+          );
+        });
+
+        if (transactionsAfterSummary.length === 0) {
+          // No transactions after summary - last cell is the summary
+          // Use the newPrincipal from the summary as current principal
+          currentPrincipalForDisplay = lastSummaryForTotal.newPrincipal;
+          // Interest is already calculated in finalYearInterestSum (finalPeriodInterest)
+        } else {
+          // There are transactions after summary - last cell is a transaction
+          // Calculate principal and interest step by step (transactions apply AFTER interest)
+          let currentPrincipal = lastSummaryForTotal.newPrincipal;
+          let totalInterestAfterSummary = 0;
+
+          // Process transactions after the summary
+          for (const tx of transactionsAfterSummary) {
+            const prevDate =
+              transactionsAfterSummary.indexOf(tx) === 0
+                ? lastSummaryDate
+                : startOfDay(
+                    new Date(
+                      transactionsAfterSummary[
+                        transactionsAfterSummary.indexOf(tx) - 1
+                      ].date
+                    )
+                  );
+            const txDate = startOfDay(new Date(tx.date));
+
+            // Calculate interest from previous date to this transaction
+            if (currentPrincipal > 0 && prevDate.getTime() < txDate.getTime()) {
+              const res = calculateInterestWithAnnualCompounding(
+                currentPrincipal,
+                rate * 100,
+                prevDate,
+                txDate
+              );
+              totalInterestAfterSummary += res.interest;
+              currentPrincipal = res.finalPrincipal; // Principal now includes interest
+            }
+
+            // Apply transaction to principal (after interest has been added)
+            if (tx.type === "payment") {
+              currentPrincipal = Math.max(0, currentPrincipal - tx.amount);
+            } else {
+              currentPrincipal += tx.amount;
+            }
+          }
+
+          // Calculate interest from last transaction to end date
+          const lastTxDate = startOfDay(
+            new Date(
+              transactionsAfterSummary[transactionsAfterSummary.length - 1].date
+            )
+          );
+          let finalPeriodInterest = 0;
+          if (
+            currentPrincipal > 0 &&
+            lastTxDate.getTime() < endDate.getTime()
+          ) {
+            const res = calculateInterestWithAnnualCompounding(
+              currentPrincipal,
+              rate * 100,
+              lastTxDate,
+              endDate
+            );
+            finalPeriodInterest = res.interest;
+            totalInterestAfterSummary += finalPeriodInterest;
+            // For display, we want principal BEFORE this final interest
+            // res.finalPrincipal = currentPrincipal + finalPeriodInterest
+            // So currentPrincipalForDisplay = currentPrincipal (before final interest)
+          }
+
+          currentPrincipalForDisplay = currentPrincipal;
+          recalculatedFinalYearInterest = totalInterestAfterSummary;
+        }
+      } else if (allTransactions.length > 0) {
+        // No summaries - last cell is a transaction
+        // Principal is already calculated after all transactions (includes interest up to last transaction)
+        // We need the principal BEFORE the final interest period
+        const lastTx = allTransactions[allTransactions.length - 1];
+        const lastTxDate = startOfDay(new Date(lastTx.date));
+        const endDate = calculationEndDate
+          ? startOfDay(new Date(calculationEndDate))
+          : startOfDay(new Date());
+
+        // principal already includes interest up to last transaction
+        // For display, we want principal before final interest period
+        currentPrincipalForDisplay = principal;
+        // finalYearInterestSum already includes final period interest, so use it
+        recalculatedFinalYearInterest = finalYearInterestSum;
+      }
+
+      // Calculate total amount due: Current Principal (from last cell) + Final Year Interest
+      const totalAmountDue =
+        currentPrincipalForDisplay + recalculatedFinalYearInterest;
 
       // Check if total amount due would be negative
       if (totalAmountDue < 0) {
@@ -877,16 +1050,26 @@ export default function Index() {
         );
         // Reset calculated values
         setLoanAmount(0);
+        setCurrentPrincipalForTotal(0);
         setCalculatedInterest(0);
+        setCalculatedResultsInterest(0);
         setCalculatedAmount(0);
         setCalculationDetails("");
         setCalculationSuccessful(false);
         return; // Don't proceed with setting results
       }
 
+      // Set values for display
+      // loanAmount is used in "Calculated Results" section - should be outstandingPrincipal (total borrowals - total repayments)
       setLoanAmount(outstandingPrincipal);
-      setCalculatedInterest(Math.max(0, totalAmountDue - outstandingPrincipal));
-      setCalculatedAmount(Math.max(0, totalAmountDue));
+      // currentPrincipalForTotal is used in "Total Amount Due" section - principal from last displayed cell
+      setCurrentPrincipalForTotal(currentPrincipalForDisplay);
+      // calculatedAmount is the total amount due (totalAmountDue was already calculated above)
+      setCalculatedAmount(totalAmountDue);
+      // calculatedInterest is for "Total Amount Due" section
+      setCalculatedInterest(recalculatedFinalYearInterest);
+      // calculatedResultsInterest is for "Calculated Results" section = Total Amount Due - Outstanding Principal
+      setCalculatedResultsInterest(totalAmountDue - outstandingPrincipal);
       setCalculationDetails(details);
       setCalculationSuccessful(true);
     },
@@ -1108,7 +1291,7 @@ export default function Index() {
   <h2>Calculated Results</h2>
   <div class="summary-box">
     <p><span class="label">Outstanding Principal:</span> ₹${formatCurrency(loanAmount)}</p>
-    <p><span class="label">Interest:</span> ₹${formatCurrency(calculatedInterest)}</p>
+    <p><span class="label">Interest:</span> ₹${formatCurrency(calculatedResultsInterest)}</p>
     <p><span class="label">Total Amount Due:</span> ₹${formatCurrency(calculatedAmount)}</p>
   </div>
 `;
@@ -1494,26 +1677,20 @@ export default function Index() {
         }
 
         // Add Total Amount Due cell at the bottom
+        // Use currentPrincipalForTotal (principal from last cell) for "Total Amount Due" section
         if (calculatedAmount > 0) {
-          // Current Principal = Principal after last transaction in final year
-          const finalPrincipalForDisplay =
-            finalPrincipalAfterLastTx > 0
-              ? finalPrincipalAfterLastTx
-              : finalYearInterestForTotal > 0
-                ? calculatedAmount - finalYearInterestForTotal
-                : calculatedAmount;
           htmlContent += `
   <div class="summary-box" style="background-color: #e6d5f7; border: 2px solid #9b59b6; margin-top: 20px;">
     <h3>Total Amount Due</h3>
     <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
       <div>
         <p style="font-size: 11px; color: #666;">Current Principal</p>
-        <p style="font-weight: bold; font-size: 13px;">₹${formatCurrency(finalPrincipalForDisplay)}</p>
+        <p style="font-weight: bold; font-size: 13px;">₹${formatCurrency(currentPrincipalForTotal)}</p>
       </div>
       <p style="font-size: 18px; font-weight: bold;">+</p>
       <div>
         <p style="font-size: 11px; color: #666;">Final Year&apos;s Interest</p>
-        <p style="font-weight: bold; font-size: 13px;">₹${formatCurrency(finalYearInterestForTotal)}</p>
+        <p style="font-weight: bold; font-size: 13px;">₹${formatCurrency(calculatedInterest)}</p>
       </div>
       <p style="font-size: 18px; font-weight: bold;">=</p>
       <div style="text-align: right;">
@@ -1868,14 +2045,14 @@ export default function Index() {
           {/* Results Display */}
           {hasCalculated &&
           calculationSuccessful &&
-          (calculatedInterest > 0 || loanAmount !== 0) ? (
+          (calculatedResultsInterest > 0 || loanAmount !== 0) ? (
             <>
               <View className="mb-6 p-4 bg-muted rounded-lg">
                 <Text variant="h3" className="mb-2">
                   Calculated Results
                 </Text>
                 <Text className="mb-1">{`Outstanding Principal: ₹${formatCurrency(loanAmount)}`}</Text>
-                <Text className="mb-1">{`Interest: ₹${formatCurrency(calculatedInterest)}`}</Text>
+                <Text className="mb-1">{`Interest: ₹${formatCurrency(calculatedResultsInterest)}`}</Text>
                 <Text variant="h4" className="mt-2">
                   {`Total Amount Due: ₹${formatCurrency(calculatedAmount)}`}
                 </Text>
@@ -2463,22 +2640,9 @@ export default function Index() {
                     }
                   }
 
-                  // Track final principal and final year interest for total amount due cell
-                  // Current Principal = Principal after last transaction in final year
-                  const finalPrincipalForDisplay =
-                    hasCalculated &&
-                    calculationSuccessful &&
-                    calculatedAmount > 0
-                      ? finalPrincipalAfterLastTx > 0
-                        ? finalPrincipalAfterLastTx
-                        : finalYearInterestForTotal > 0
-                          ? calculatedAmount - finalYearInterestForTotal
-                          : calculatedAmount
-                      : 0;
-
-                  // Old duplicate code removed - new year-cycle-based rendering above handles everything
-
                   // Add Total Amount Due cell at the bottom
+                  // Use the actual calculated values (loanAmount and calculatedInterest)
+                  // to ensure the math adds up correctly
                   if (
                     hasCalculated &&
                     calculationSuccessful &&
@@ -2512,7 +2676,7 @@ export default function Index() {
                               numberOfLines={1}
                               ellipsizeMode="tail"
                             >
-                              {`₹${formatCurrency(finalPrincipalForDisplay)}`}
+                              {`₹${formatCurrency(currentPrincipalForTotal)}`}
                             </Text>
                           </View>
                           <Text
@@ -2532,7 +2696,7 @@ export default function Index() {
                               numberOfLines={1}
                               ellipsizeMode="tail"
                             >
-                              {`₹${formatCurrency(finalYearInterestForTotal)}`}
+                              {`₹${formatCurrency(calculatedInterest)}`}
                             </Text>
                           </View>
                           <Text

@@ -49,6 +49,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       // Force re-render by updating Appearance
       const { Appearance } = require("react-native");
       Appearance.setColorScheme(newTheme);
+      // Force a small delay to ensure state updates
+      await new Promise((resolve) => setTimeout(resolve, 0));
     } catch (error) {
       console.error("Error saving theme:", error);
     }
