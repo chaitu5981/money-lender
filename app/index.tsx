@@ -160,7 +160,7 @@ export default function Index() {
         }
       }
     } catch (error) {
-      console.error("Error loading data:", error);
+      // Error loading data
     }
   };
 
@@ -169,7 +169,7 @@ export default function Index() {
       await AsyncStorage.setItem(STORAGE_KEYS.INTEREST_RATE, rate);
       setInterestRate(rate);
     } catch (error) {
-      console.error("Error saving interest rate:", error);
+      // Error saving interest rate
     }
   };
 
@@ -185,7 +185,7 @@ export default function Index() {
       }
       setCalculationEndDate(date);
     } catch (error) {
-      console.error("Error saving calculation end date:", error);
+      // Error saving calculation end date
     }
   };
 
@@ -220,7 +220,7 @@ export default function Index() {
               setCalculationEndDate(null);
               setHasCalculated(false);
             } catch (error) {
-              console.error("Error clearing data:", error);
+              // Error clearing data
             }
           },
         },
@@ -315,7 +315,7 @@ export default function Index() {
         JSON.stringify(updatedPayments)
       );
     } catch (error) {
-      console.error("Error saving payment:", error);
+      // Error saving payment
     }
 
     // Reset form
@@ -360,7 +360,7 @@ export default function Index() {
                 calculateResults(updatedPayments, receipts);
               }
             } catch (error) {
-              console.error("Error deleting payment:", error);
+              // Error deleting payment
             }
           },
         },
@@ -417,7 +417,7 @@ export default function Index() {
         JSON.stringify(updatedReceipts)
       );
     } catch (error) {
-      console.error("Error saving receipt:", error);
+      // Error saving receipt
     }
 
     // Reset form
@@ -462,7 +462,7 @@ export default function Index() {
                 calculateResults(payments, updatedReceipts);
               }
             } catch (error) {
-              console.error("Error deleting receipt:", error);
+              // Error deleting receipt
             }
           },
         },
@@ -729,85 +729,406 @@ export default function Index() {
 
             if (event.type === "anniv") {
               // Compute principal before the final segment in this year by applying in-year txs
+              // For Year 1: Include transactions from year start (inclusive) up to and including the anniversary date
+              // For Year 2+: Include transactions AFTER year start (exclusive) up to and including the anniversary date
+              // Transactions on the year start date (previous year's anniversary) belong to the previous year, not the current year
+              const prevSummary =
+                summaries.length > 0 ? summaries[summaries.length - 1] : null;
+              const isYear1 = !prevSummary;
               const yearTxsForPrincipal = allTransactions
-                .filter(
-                  (t) =>
-                    startOfDay(new Date(t.date)).getTime() >=
-                      currentYearStart.getTime() &&
-                    startOfDay(new Date(t.date)).getTime() <
-                      startOfDay(event.date).getTime()
-                )
+                .filter((t) => {
+                  const txDate = startOfDay(new Date(t.date));
+                  const txTime = txDate.getTime();
+                  const yearStartTime = currentYearStart.getTime();
+                  const anniversaryTime = startOfDay(event.date).getTime();
+                  // For Year 1: include transactions on or after year start
+                  // For Year 2+: exclude transactions on year start (they belong to previous year)
+                  if (isYear1) {
+                    return txTime >= yearStartTime && txTime <= anniversaryTime;
+                  } else {
+                    return txTime > yearStartTime && txTime <= anniversaryTime;
+                  }
+                })
                 .sort(
                   (a, b) =>
                     new Date(a.date).getTime() - new Date(b.date).getTime()
                 );
-              // Start from previous year's new principal
-              const prevSummary =
-                summaries.length > 0 ? summaries[summaries.length - 1] : null;
-              let principalBeforeFinalSegment = prevSummary
-                ? prevSummary.newPrincipal
-                : 0;
-              for (const t of yearTxsForPrincipal) {
-                principalBeforeFinalSegment =
-                  t.type === "payment"
-                    ? Math.max(0, principalBeforeFinalSegment - t.amount)
-                    : principalBeforeFinalSegment + t.amount;
-              }
+              // Start from previous year's new principal (prevSummary already declared above)
 
               // Year summary interest should be the sum of ALL interest periods in this year
               // Recalculate to ensure it matches what's displayed in cells
               // Start from previous year's new principal and calculate all interest periods in this year
               let recalculatedTotalInterest = 0;
-              let calcPrincipal = prevSummary ? prevSummary.newPrincipal : 0;
+              const initialPrincipal = prevSummary
+                ? prevSummary.newPrincipal
+                : 0; // Store original principal
+              let calcPrincipal = initialPrincipal;
               let lastCalcDate = currentYearStart;
 
               // Process all transactions and calculate interest for each period
+              // Calculate interest between transactions, EXCEPT when repayment is on anniversary date
+              // The special handling (no interest) only applies to repayments on anniversary date
+              // Track the principal displayed in the last interest cell (for repayments on anniversary)
+              // Track principal after each transaction (before interest) for the last cell
+              let lastDisplayedPrincipalForCalc = calcPrincipal;
+              let principalAfterTxForCalc = calcPrincipal; // Track principal after each transaction (before interest)
+              let transactionIndex = 0; // Track transaction index to identify first transaction
               for (const t of yearTxsForPrincipal) {
                 const txDate = startOfDay(new Date(t.date));
-                if (
-                  calcPrincipal > 0 &&
-                  lastCalcDate.getTime() < txDate.getTime()
-                ) {
-                  const res = calculateInterestWithAnnualCompounding(
+
+                // Check if current transaction is a REPAYMENT on the anniversary date
+                // If repayment is on anniversary date, don't calculate interest from previous tx to repayment date
+                const isRepaymentOnAnniversary =
+                  t.type === "payment" &&
+                  txDate.getTime() === startOfDay(event.date).getTime();
+
+                // Calculate interest even if calcPrincipal is 0 (will result in 0 interest, but matches displayed cells)
+                // Also calculate interest even if dates are the same (0 days, 0 interest) to match displayed cells)
+                // If principal is 0 or negative, interest will be 0, but we still calculate to match displayed cells
+                // IMPORTANT: For the first transaction, we ALWAYS calculate interest from year start to that transaction
+                // (matching the rendering loop which shows interest from year start to first transaction, even if it's a repayment on anniversary)
+                // For subsequent transactions, we skip interest calculation if repayment is on anniversary
+                const isFirstTransaction = transactionIndex === 0;
+
+                // Always calculate interest for first transaction (even if repayment on anniversary)
+                // For other transactions, calculate interest unless it's a repayment on anniversary
+                // CRITICAL: For first transaction, we MUST calculate interest from year start, regardless of whether it's a repayment on anniversary
+                if (isFirstTransaction) {
+                  // First transaction: ALWAYS calculate interest from year start to this transaction
+                  // Use calcPrincipal (principal at year start) for interest calculation
+                  const principalForInterest = Math.max(0, calcPrincipal);
+                  let res;
+
+                  // Always calculate interest from year start (lastCalcDate) to first transaction date
+                  // This matches the rendering loop which always shows interest from year start to first transaction
+                  if (lastCalcDate.getTime() < txDate.getTime()) {
+                    // There's a gap - calculate interest
+                    res = calculateInterestWithAnnualCompounding(
+                      principalForInterest,
+                      rate * 100,
+                      lastCalcDate,
+                      txDate
+                    );
+                  } else {
+                    // Same date - 0 interest
+                    res = { interest: 0, finalPrincipal: principalForInterest };
+                  }
+
+                  // CRITICAL: Always add interest for first transaction to recalculatedTotalInterest
+                  // This ensures the interest from year start to first transaction is included in the year summary
+                  recalculatedTotalInterest += res.interest;
+                  // Track the principal displayed in this interest cell
+                  lastDisplayedPrincipalForCalc = principalForInterest;
+                  // Update calcPrincipal with interest for next period
+                  const principalToCheck = principalForInterest;
+                  if (
+                    principalToCheck > 0 &&
+                    lastCalcDate.getTime() < txDate.getTime()
+                  ) {
+                    calcPrincipal = res.finalPrincipal;
+                  } else {
+                    calcPrincipal = principalForInterest;
+                  }
+
+                  // SPECIAL CASE: If this is the ONLY transaction and it's on year start,
+                  // we need to calculate interest from year start to anniversary
+                  // This handles the case where there's only 1 transaction in the year
+                  if (
+                    yearTxsForPrincipal.length === 1 &&
+                    txDate.getTime() === currentYearStart.getTime()
+                  ) {
+                    // Only one transaction on year start - calculate interest from year start to anniversary
+                    // Use principal AFTER the first transaction for this calculation
+                    // Apply the transaction to get the principal after it
+                    const principalAfterFirstTx =
+                      t.type === "payment"
+                        ? Math.max(0, principalForInterest - t.amount)
+                        : principalForInterest + t.amount;
+                    const fullYearRes = calculateInterestWithAnnualCompounding(
+                      principalAfterFirstTx,
+                      rate * 100,
+                      currentYearStart,
+                      startOfDay(event.date)
+                    );
+                    // Replace the 0 interest with the full year interest
+                    recalculatedTotalInterest = fullYearRes.interest;
+                    calcPrincipal = fullYearRes.finalPrincipal;
+                    lastDisplayedPrincipalForCalc = principalAfterFirstTx;
+                    // Update principalAfterTxForCalc to reflect the transaction
+                    principalAfterTxForCalc = principalAfterFirstTx;
+                  }
+                } else if (!isRepaymentOnAnniversary) {
+                  // Not first transaction AND not a repayment on anniversary: calculate interest
+                  // SPECIAL CASE: If first transaction was on year start and this transaction is on anniversary,
+                  // calculate interest from year start to anniversary using initial principal
+                  const firstTx = yearTxsForPrincipal[0];
+                  const firstTxDate = firstTx
+                    ? startOfDay(new Date(firstTx.date))
+                    : null;
+                  const firstTxOnYearStart =
+                    firstTxDate &&
+                    firstTxDate.getTime() === currentYearStart.getTime();
+                  const isSecondTxOnAnniversary =
+                    transactionIndex === 1 &&
+                    txDate.getTime() === startOfDay(event.date).getTime();
+
+                  let principalForInterest: number;
+                  let interestFromDate: Date;
+
+                  if (
+                    firstTxOnYearStart &&
+                    isSecondTxOnAnniversary &&
+                    initialPrincipal > 0
+                  ) {
+                    // First transaction on year start, second on anniversary, and we have initial principal
+                    // Calculate interest from year start to anniversary using initial principal
+                    // This ensures we calculate interest for the full year period
+                    principalForInterest = Math.max(0, initialPrincipal);
+                    interestFromDate = currentYearStart;
+                  } else {
+                    // Normal case: use principal after previous transaction
+                    principalForInterest = Math.max(0, principalAfterTxForCalc);
+                    interestFromDate = lastCalcDate;
+                  }
+
+                  let res;
+
+                  if (interestFromDate.getTime() < txDate.getTime()) {
+                    // There's a gap - calculate interest
+                    res = calculateInterestWithAnnualCompounding(
+                      principalForInterest,
+                      rate * 100,
+                      interestFromDate,
+                      txDate
+                    );
+                  } else {
+                    // Same date - 0 interest
+                    res = { interest: 0, finalPrincipal: principalForInterest };
+                  }
+
+                  recalculatedTotalInterest += res.interest;
+                  // Track the principal displayed in this interest cell
+                  lastDisplayedPrincipalForCalc = principalForInterest;
+                  // Update calcPrincipal with interest for next period
+                  // Use principalAfterTxForCalc (principal after previous transaction, before interest)
+                  // But if we calculated from year start using initial principal, use that for updating
+                  if (
+                    firstTxOnYearStart &&
+                    isSecondTxOnAnniversary &&
+                    initialPrincipal > 0
+                  ) {
+                    // We calculated from year start using initial principal
+                    // Update calcPrincipal based on the interest calculation result
+                    if (
+                      principalForInterest > 0 &&
+                      interestFromDate.getTime() < txDate.getTime()
+                    ) {
+                      calcPrincipal = res.finalPrincipal;
+                    } else {
+                      calcPrincipal = principalForInterest;
+                    }
+                  } else if (
+                    principalAfterTxForCalc > 0 &&
+                    interestFromDate.getTime() < txDate.getTime()
+                  ) {
+                    calcPrincipal = res.finalPrincipal;
+                  } else {
+                    calcPrincipal = principalAfterTxForCalc;
+                  }
+                } else {
+                  // Repayment is on anniversary date (and NOT the first transaction)
+                  // CRITICAL FIX: We still need to calculate interest from previous transaction to anniversary
+                  // The interest should be included in the year summary even if the repayment is on the anniversary
+                  // SPECIAL CASE: If first transaction was on year start date, calculate interest from year start
+                  // using initial principal, not from first transaction using principal after first transaction
+
+                  // Check if first transaction was on year start date
+                  const firstTx = yearTxsForPrincipal[0];
+                  const firstTxDate = firstTx
+                    ? startOfDay(new Date(firstTx.date))
+                    : null;
+                  const firstTxOnYearStart =
+                    firstTxDate &&
+                    firstTxDate.getTime() === currentYearStart.getTime();
+
+                  let principalForInterest: number;
+                  let interestStartDate: Date;
+
+                  if (firstTxOnYearStart && transactionIndex === 1) {
+                    // First transaction was on year start, and this is the second transaction (on anniversary)
+                    // CRITICAL: Calculate interest from first transaction date to anniversary
+                    // The principal to use is the one AFTER the first transaction has been applied
+                    // This is stored in principalAfterTxForCalc, which was updated after processing the first transaction
+                    // But we need to get it BEFORE we process the second transaction
+                    // Actually, principalAfterTxForCalc at this point is the principal after the FIRST transaction
+                    // which is exactly what we need for calculating interest from first tx to anniversary
+                    principalForInterest = Math.max(0, principalAfterTxForCalc);
+                    interestStartDate = firstTxDate!; // Use first transaction date (same as year start, but semantically correct)
+                  } else {
+                    // Normal case: calculate from previous transaction using principal after previous transaction
+                    principalForInterest = Math.max(0, principalAfterTxForCalc);
+                    interestStartDate = lastCalcDate;
+                  }
+
+                  let res;
+                  if (interestStartDate.getTime() < txDate.getTime()) {
+                    // Calculate interest from start date to anniversary date
+                    res = calculateInterestWithAnnualCompounding(
+                      principalForInterest,
+                      rate * 100,
+                      interestStartDate,
+                      txDate
+                    );
+                  } else {
+                    res = { interest: 0, finalPrincipal: principalForInterest };
+                  }
+
+                  recalculatedTotalInterest += res.interest;
+                  lastDisplayedPrincipalForCalc = principalForInterest;
+
+                  // Use the principal displayed in the previous interest cell for applying repayment
+                  // This ensures we apply repayment to the correct principal (previous cell's displayed principal)
+                  calcPrincipal = lastDisplayedPrincipalForCalc;
+                }
+                // Apply transaction (even if on the same date as lastCalcDate or on anniversary)
+                // Apply transaction to the correct principal:
+                // - If repayment on anniversary: use lastDisplayedPrincipalForCalc (previous cell's principal)
+                // - Otherwise: use principalAfterTxForCalc (principal after previous transaction, before interest)
+                // This ensures we don't add interest before applying the transaction
+                const principalBeforeTxForCalc =
+                  t.type === "payment" &&
+                  txDate.getTime() === startOfDay(event.date).getTime()
+                    ? lastDisplayedPrincipalForCalc // Repayment on anniversary: use previous cell's principal
+                    : principalAfterTxForCalc; // Otherwise: use principal after previous transaction (before interest)
+
+                calcPrincipal =
+                  t.type === "payment"
+                    ? Math.max(0, principalBeforeTxForCalc - t.amount)
+                    : principalBeforeTxForCalc + t.amount;
+                // Track principal after this transaction (before interest for next period)
+                principalAfterTxForCalc = calcPrincipal;
+                // Update lastCalcDate to transaction date
+                lastCalcDate = txDate;
+                // Increment transaction index for next iteration
+                transactionIndex++;
+              }
+
+              // Store principal before final segment interest (for display purposes)
+              // This should be the principal after the last transaction, before any interest calculations
+              // Use principalAfterTxForCalc which tracks principal after each transaction (before interest)
+              // This represents the "latest current principal" after all transactions in the year
+              const principalBeforeFinalSegment = principalAfterTxForCalc;
+
+              // Calculate final segment interest if there's a gap after the last transaction (or year start if no transactions)
+              // and before the anniversary date. If the last transaction is ON the anniversary date,
+              // lastCalcDate will equal event.date, so this condition will be false and no final
+              // segment interest will be calculated (which is correct).
+              // CRITICAL: If there are no transactions in the year, we MUST calculate interest from year start to anniversary
+              const hasNoTransactions = yearTxsForPrincipal.length === 0;
+              const hasGapBeforeAnniversary =
+                lastCalcDate.getTime() < startOfDay(event.date).getTime();
+
+              // PRIORITY 1: If there are no transactions in the year, calculate interest for the entire year period
+              // This is the critical case: a year with no transactions should still accrue interest
+              const yearStartDate = startOfDay(currentYearStart);
+              const yearEndDate = startOfDay(event.date);
+              const isValidDateRange =
+                yearStartDate.getTime() < yearEndDate.getTime();
+
+              if (
+                hasNoTransactions &&
+                initialPrincipal > 0 &&
+                isValidDateRange
+              ) {
+                // No transactions in this year - calculate interest from year start to anniversary date
+                const finalRes = calculateInterestWithAnnualCompounding(
+                  initialPrincipal,
+                  rate * 100,
+                  yearStartDate,
+                  yearEndDate
+                );
+                recalculatedTotalInterest += finalRes.interest;
+                calcPrincipal = finalRes.finalPrincipal;
+                segmentInterest = finalRes.interest;
+              }
+              // PRIORITY 2: If there are transactions but there's a gap after the last transaction before anniversary
+              // CRITICAL: Only calculate final segment if the last transaction is NOT on the anniversary date
+              // and we haven't already calculated interest for this period in the transaction loop
+              else if (calcPrincipal > 0 && hasGapBeforeAnniversary) {
+                // Check if we already calculated interest for this period
+                // If the last transaction was on year start and we only have 1 transaction,
+                // we should have calculated interest in the transaction loop, so skip final segment
+                const lastTx =
+                  yearTxsForPrincipal[yearTxsForPrincipal.length - 1];
+                const lastTxDate = lastTx
+                  ? startOfDay(new Date(lastTx.date))
+                  : null;
+                const lastTxOnYearStart =
+                  lastTxDate &&
+                  lastTxDate.getTime() === currentYearStart.getTime();
+                const onlyOneTransaction = yearTxsForPrincipal.length === 1;
+
+                // If we have only one transaction on year start, interest should have been calculated in the loop
+                // (either as first transaction interest or in the special case handling)
+                // So we should NOT calculate final segment in this case
+                if (onlyOneTransaction && lastTxOnYearStart) {
+                  // Skip final segment - interest already calculated in transaction loop
+                } else {
+                  // There are transactions before anniversary, and there's a gap after the last transaction before anniversary
+                  const finalRes = calculateInterestWithAnnualCompounding(
                     calcPrincipal,
                     rate * 100,
                     lastCalcDate,
-                    txDate
+                    startOfDay(event.date)
                   );
-                  recalculatedTotalInterest += res.interest;
-                  calcPrincipal = res.finalPrincipal;
+                  recalculatedTotalInterest += finalRes.interest;
+                  calcPrincipal = finalRes.finalPrincipal; // Update calcPrincipal with final segment interest
+                  // Update segmentInterest to match the recalculated value
+                  segmentInterest = finalRes.interest;
                 }
-                // Apply transaction
-                calcPrincipal =
-                  t.type === "payment"
-                    ? Math.max(0, calcPrincipal - t.amount)
-                    : calcPrincipal + t.amount;
-                lastCalcDate = txDate;
+              } else {
+                // No final segment interest (transaction is on anniversary date, or no principal, or dates are equal)
+                // Don't add any additional interest here - recalculatedTotalInterest already contains
+                // all the interest periods calculated in the loop above, which matches what's displayed
+                // The segmentInterest calculated before the anniversary might not match if there are
+                // transactions in the year, so we only use recalculatedTotalInterest
               }
 
-              // Calculate final segment interest
+              // FALLBACK: If no interest was calculated but we have principal and no transactions,
+              // force calculation (this handles edge cases where the first condition wasn't met)
+              // This is critical for years with no transactions - they MUST accrue interest
+              // We check this AFTER all other logic to ensure we don't miss this case
               if (
-                calcPrincipal > 0 &&
-                lastCalcDate.getTime() < startOfDay(event.date).getTime()
+                recalculatedTotalInterest === 0 &&
+                hasNoTransactions &&
+                initialPrincipal > 0
               ) {
-                const finalRes = calculateInterestWithAnnualCompounding(
-                  calcPrincipal,
-                  rate * 100,
-                  lastCalcDate,
-                  startOfDay(event.date)
-                );
-                recalculatedTotalInterest += finalRes.interest;
-                // Update segmentInterest to match the recalculated value
-                segmentInterest = finalRes.interest;
+                // Double-check date range
+                if (isValidDateRange) {
+                  const fallbackRes = calculateInterestWithAnnualCompounding(
+                    initialPrincipal,
+                    rate * 100,
+                    yearStartDate,
+                    yearEndDate
+                  );
+                  recalculatedTotalInterest = fallbackRes.interest;
+                  calcPrincipal = fallbackRes.finalPrincipal;
+                  segmentInterest = fallbackRes.interest;
+                }
               }
 
               const totalYearInterest = recalculatedTotalInterest;
 
-              // New Principal = Current Principal of last cell + Total Interest of the year
-              // Current Principal of last cell = principalBeforeFinalSegment (before final segment interest is added)
-              // So: New Principal = principalBeforeFinalSegment + totalYearInterest
+              // New Principal = Latest Current Principal (after all transactions) + Total Year Interest
+              // The latest current principal should be the principal after ALL transactions in the year
+              // principalAfterTxForCalc tracks the principal after each transaction (before interest)
+              // At the end of the transaction loop, it should be the principal after the last transaction
+              // Use principalAfterTxForCalc as it's guaranteed to be the principal after transactions (before interest)
+              // calcPrincipal might be modified to include interest in final segment calculation, so we use principalAfterTxForCalc
+              const latestCurrentPrincipal = principalAfterTxForCalc;
+
               const newPrincipalManual =
-                principalBeforeFinalSegment + totalYearInterest;
+                latestCurrentPrincipal + totalYearInterest;
 
               summaries.push({
                 yearNumber,
@@ -1393,6 +1714,12 @@ export default function Index() {
             );
           });
 
+          // Add Year heading at the top of each year's section
+          const yearHeading = yearSummary
+            ? `Year ${yearSummary.yearNumber}`
+            : `Year ${yearNum}`;
+          htmlContent += `<h2 class="text-xl font-bold mb-4 mt-6">${yearHeading}</h2>`;
+
           // Use previous year's newPrincipal as starting principal for this year
           if (yearSummary) {
             const prevSummary = sortedSummaries.find(
@@ -1437,17 +1764,24 @@ export default function Index() {
           }
 
           // Render interest cells and transactions for this year
+          // Track the principal displayed in the last interest cell (for repayments on anniversary)
+          // Track principal after each transaction (before interest) for the last cell
+          let lastDisplayedPrincipal = currentPrincipal;
+          let principalAfterTx = currentPrincipal; // Track principal after each transaction (before interest)
           for (let i = 0; i < yearTxs.length; i++) {
             const tx = yearTxs[i];
             const txDate = startOfDay(new Date(tx.date));
 
             // Interest from previous tx (or year start) to current tx
-            if (i === 0 && currentPrincipal > 0) {
+            // Calculate interest even if currentPrincipal is 0 (will result in 0 interest, but shows the period)
+            if (i === 0) {
               const from = yearStart!;
               const to = txDate;
               if (to.getTime() > from.getTime()) {
+                // If principal is 0 or negative, interest will be 0, but we still calculate to show the period
+                const principalForInterest = Math.max(0, currentPrincipal);
                 const res = calculateInterestWithAnnualCompounding(
-                  currentPrincipal,
+                  principalForInterest,
                   rate * 100,
                   from,
                   to
@@ -1455,12 +1789,17 @@ export default function Index() {
                 const days = diffDaysExclusive(from, to);
                 htmlContent += `
   <div class="interest-cell">
-    <p><strong>Current Principal:</strong> ₹${formatCurrency(currentPrincipal)}</p>
+    <p><strong>Current Principal:</strong> ₹${formatCurrency(principalForInterest)}</p>
     <p><strong>From:</strong> ${from.toLocaleDateString()} → <strong>To:</strong> ${to.toLocaleDateString()}</p>
     <p><strong>Period:</strong> ${days} days</p>
     <p><strong>Interest:</strong> ₹${formatCurrency(res.interest)}</p>
   </div>`;
-                currentPrincipal = res.finalPrincipal;
+                // Track the principal displayed in this interest cell
+                lastDisplayedPrincipal = principalForInterest;
+                // Only update currentPrincipal if it was positive (to avoid going negative)
+                if (currentPrincipal > 0) {
+                  currentPrincipal = res.finalPrincipal;
+                }
                 // Track interest for final year
                 if (
                   finalYearStart &&
@@ -1474,37 +1813,135 @@ export default function Index() {
               const from = startOfDay(new Date(prevTx.date));
               const to = txDate;
 
-              if (to.getTime() > from.getTime() && currentPrincipal > 0) {
-                const res = calculateInterestWithAnnualCompounding(
-                  currentPrincipal,
+              // Check if current transaction is a REPAYMENT on the anniversary date
+              // If repayment is on anniversary date, don't calculate interest from previous tx to repayment date
+              // (We apply repayment directly to previous cell's principal)
+              // For borrowals on anniversary date, we DO calculate interest (to show period before borrowal)
+              const isRepaymentOnAnniversary =
+                tx.type === "payment" &&
+                yearEnd &&
+                txDate.getTime() === yearEnd.getTime();
+
+              // Calculate interest between transactions
+              // CRITICAL FIX: Even when repayment is on anniversary date, we still need to show the interest cell
+              // The interest from previous transaction (or year start) to anniversary should be displayed
+              // Calculate interest even if currentPrincipal is 0 (will result in 0 interest, but shows the period)
+              // Also show interest cell even if dates are the same (0 days, 0 interest)
+
+              // Determine the principal and start date for interest calculation
+              let principalForInterest: number;
+              let interestFrom: Date;
+
+              if (isRepaymentOnAnniversary && i === 1) {
+                // Payment on anniversary, and this is the second transaction
+                // Check if first transaction was on year start date
+                const firstTx = yearTxs[0];
+                const firstTxDate = firstTx
+                  ? startOfDay(new Date(firstTx.date))
+                  : null;
+                const firstTxOnYearStart =
+                  firstTxDate && firstTxDate.getTime() === yearStart!.getTime();
+
+                if (firstTxOnYearStart) {
+                  // First transaction was on year start - calculate from year start
+                  // For Year 1: use principal after first transaction
+                  // For Year 2+: use initial principal from previous year
+                  const prevYearSummary = sortedSummaries.find(
+                    (s) => s.yearNumber === yearNum - 1
+                  );
+                  if (prevYearSummary) {
+                    // Year 2+: use initial principal
+                    principalForInterest = Math.max(
+                      0,
+                      prevYearSummary.newPrincipal
+                    );
+                  } else {
+                    // Year 1: use principal after first transaction
+                    principalForInterest = Math.max(0, principalAfterTx);
+                  }
+                  interestFrom = yearStart!;
+                } else {
+                  // Normal case: use principal after previous transaction
+                  principalForInterest = Math.max(0, principalAfterTx);
+                  interestFrom = from;
+                }
+              } else {
+                // Normal case: use principal after previous transaction
+                principalForInterest = Math.max(0, principalAfterTx);
+                interestFrom = from;
+              }
+
+              let res;
+              let days = 0;
+
+              if (to.getTime() > interestFrom.getTime()) {
+                // There's a gap - calculate interest
+                res = calculateInterestWithAnnualCompounding(
+                  principalForInterest,
                   rate * 100,
-                  from,
+                  interestFrom,
                   to
                 );
-                const days = diffDaysExclusive(from, to);
-                htmlContent += `
+                days = diffDaysExclusive(interestFrom, to);
+              } else {
+                // Same date - show 0 days and 0 interest
+                res = { interest: 0, finalPrincipal: principalForInterest };
+              }
+
+              htmlContent += `
   <div class="interest-cell">
-    <p><strong>Current Principal:</strong> ₹${formatCurrency(currentPrincipal)}</p>
-    <p><strong>From:</strong> ${from.toLocaleDateString()} → <strong>To:</strong> ${to.toLocaleDateString()}</p>
+    <p><strong>Current Principal:</strong> ₹${formatCurrency(principalForInterest)}</p>
+    <p><strong>From:</strong> ${interestFrom.toLocaleDateString()} → <strong>To:</strong> ${to.toLocaleDateString()}</p>
     <p><strong>Period:</strong> ${days} days</p>
     <p><strong>Interest:</strong> ₹${formatCurrency(res.interest)}</p>
   </div>`;
+              // Track the principal displayed in this interest cell
+              lastDisplayedPrincipal = principalForInterest;
+              // Update currentPrincipal with interest for next period
+              if (
+                principalForInterest > 0 &&
+                to.getTime() > interestFrom.getTime()
+              ) {
                 currentPrincipal = res.finalPrincipal;
-                // Track interest for final year
-                if (
-                  finalYearStart &&
-                  from.getTime() >= finalYearStart.getTime()
-                ) {
-                  finalYearInterestForTotal += res.interest;
-                }
+              } else {
+                currentPrincipal = principalForInterest;
+              }
+              // Track interest for final year
+              if (
+                finalYearStart &&
+                interestFrom.getTime() >= finalYearStart.getTime()
+              ) {
+                finalYearInterestForTotal += res.interest;
+              }
+
+              // If repayment is on anniversary, we still update currentPrincipal for the repayment
+              if (isRepaymentOnAnniversary) {
+                // The repayment will be applied to lastDisplayedPrincipal (previous cell's principal)
+                // But we've already updated currentPrincipal above, so we need to adjust
+                currentPrincipal = lastDisplayedPrincipal;
               }
             }
 
             // Render transaction cell (without Principal before)
+            // Apply transaction to the correct principal:
+            // - If repayment on anniversary: use lastDisplayedPrincipal (previous cell's principal)
+            // - Otherwise: use principalAfterTx (principal after previous transaction, before interest)
+            // This ensures we don't add interest before applying the transaction
+            const principalBeforeTx =
+              tx.type === "payment" &&
+              yearEnd &&
+              txDate.getTime() === yearEnd.getTime()
+                ? lastDisplayedPrincipal // Repayment on anniversary: use previous cell's principal
+                : principalAfterTx; // Otherwise: use principal after previous transaction (before interest)
+
             currentPrincipal =
               tx.type === "payment"
-                ? Math.max(0, currentPrincipal - tx.amount)
-                : currentPrincipal + tx.amount;
+                ? Math.max(0, principalBeforeTx - tx.amount)
+                : principalBeforeTx + tx.amount;
+
+            // Track principal after this transaction (before interest for next period)
+            // This is the value that should be shown in the last cell
+            principalAfterTx = currentPrincipal;
 
             // Track principal after last transaction in final year
             if (
@@ -1525,6 +1962,8 @@ export default function Index() {
           }
 
           // Render final segment from last transaction to min(year-end, Calculate-upto)
+          // Always render this cell if last transaction is on anniversary date (even if 0 days)
+          // This works for both borrowals (receipts) and repayments (payments) on the anniversary date
           if (yearSummary && yearTxs.length > 0 && yearEnd) {
             const lastTx = yearTxs[yearTxs.length - 1];
             const lastTxDate = startOfDay(new Date(lastTx.date));
@@ -1533,12 +1972,13 @@ export default function Index() {
                 ? endDate
                 : yearEnd;
 
-            if (finalSegmentEnd.getTime() > lastTxDate.getTime()) {
-              const principalAfterLastTx =
-                lastTx.type === "payment"
-                  ? Math.max(0, currentPrincipal)
-                  : currentPrincipal;
+            // Get principal after last transaction (without interest)
+            // This should be the principal after the last transaction, before any interest calculations
+            // Use principalAfterTx which tracks principal after each transaction (before interest)
+            const principalAfterLastTx = principalAfterTx;
 
+            if (finalSegmentEnd.getTime() > lastTxDate.getTime()) {
+              // There's a gap - calculate interest
               if (principalAfterLastTx > 0) {
                 const res = calculateInterestWithAnnualCompounding(
                   principalAfterLastTx,
@@ -1562,6 +2002,17 @@ export default function Index() {
                   finalYearInterestForTotal += res.interest;
                 }
               }
+            } else if (finalSegmentEnd.getTime() === lastTxDate.getTime()) {
+              // Same date - show 0 days and ₹0 interest
+              // Always show this cell regardless of principal amount (works for both borrowals and repayments)
+              const days = 0;
+              htmlContent += `
+  <div class="interest-cell">
+    <p><strong>Current Principal:</strong> ₹${formatCurrency(principalAfterLastTx)}</p>
+    <p><strong>From:</strong> ${lastTxDate.toLocaleDateString()} → <strong>To:</strong> ${finalSegmentEnd.toLocaleDateString()}</p>
+    <p><strong>Period:</strong> ${days} days</p>
+    <p><strong>Interest:</strong> ₹${formatCurrency(0)}</p>
+  </div>`;
             }
           }
 
@@ -1720,7 +2171,7 @@ export default function Index() {
         Alert.alert("PDF Generated", `PDF saved at: ${uri}`, [{ text: "OK" }]);
       }
     } catch (error) {
-      console.error("Error generating PDF:", error);
+      // Error generating PDF
       Alert.alert("Error", "Failed to generate PDF. Please try again.");
     }
   };
@@ -2200,6 +2651,19 @@ export default function Index() {
                       );
                     });
 
+                    // Add Year heading at the top of each year's section
+                    const yearHeading = yearSummary
+                      ? `Year ${yearSummary.yearNumber}`
+                      : `Year ${yearNum}`;
+                    rendered.push(
+                      <View
+                        key={`year-heading-${yearNum}`}
+                        className="mb-4 mt-6"
+                      >
+                        <Text className="text-xl font-bold">{yearHeading}</Text>
+                      </View>
+                    );
+
                     // Use previous year's newPrincipal as starting principal for this year
                     if (yearSummary) {
                       const prevSummary = summaries.find(
@@ -2266,17 +2730,27 @@ export default function Index() {
                     }
 
                     // Render interest cells between consecutive transactions in this year
+                    // Track the principal displayed in the last interest cell (for repayments on anniversary)
+                    // Track principal after each transaction (before interest) for the last cell
+                    let lastDisplayedPrincipalRN = currentPrincipal;
+                    let principalAfterTxRN = currentPrincipal; // Track principal after each transaction (before interest)
                     for (let i = 0; i < yearTxs.length; i++) {
                       const tx = yearTxs[i];
                       const txDate = startOfDay(new Date(tx.date));
 
                       // Interest from previous tx (or year start) to current tx
-                      if (i === 0 && currentPrincipal > 0) {
+                      // Calculate interest even if currentPrincipal is 0 (will result in 0 interest, but shows the period)
+                      if (i === 0) {
                         const from = yearStart;
                         const to = txDate;
                         if (to.getTime() > from.getTime()) {
+                          // If principal is 0 or negative, interest will be 0, but we still calculate to show the period
+                          const principalForInterest = Math.max(
+                            0,
+                            currentPrincipal
+                          );
                           const res = calculateInterestWithAnnualCompounding(
-                            currentPrincipal,
+                            principalForInterest,
                             rate * 100,
                             from,
                             to
@@ -2288,7 +2762,7 @@ export default function Index() {
                               className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
                             >
                               <Text className="text-[11px] font-semibold mb-1">
-                                {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
+                                {`Current Principal: ₹${formatCurrency(principalForInterest)}`}
                               </Text>
                               <Text className="text-[10px] text-muted-foreground">
                                 {`From: ${from.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
@@ -2306,7 +2780,12 @@ export default function Index() {
                               </View>
                             </View>
                           );
-                          currentPrincipal = res.finalPrincipal;
+                          // Track the principal displayed in this interest cell
+                          lastDisplayedPrincipalRN = principalForInterest;
+                          // Only update currentPrincipal if it was positive (to avoid going negative)
+                          if (currentPrincipal > 0) {
+                            currentPrincipal = res.finalPrincipal;
+                          }
                           // Track interest for final year
                           if (
                             finalYearStart &&
@@ -2319,60 +2798,167 @@ export default function Index() {
                         const prevTx = yearTxs[i - 1];
                         const from = startOfDay(new Date(prevTx.date));
                         const to = txDate;
-                        // currentPrincipal already includes prevTx from previous iteration
-                        // So we don't need to update it again here
 
-                        if (
-                          to.getTime() > from.getTime() &&
-                          currentPrincipal > 0
-                        ) {
-                          const res = calculateInterestWithAnnualCompounding(
-                            currentPrincipal,
+                        // Check if current transaction is a REPAYMENT on the anniversary date
+                        // If repayment is on anniversary date, don't calculate interest from previous tx to repayment date
+                        // (We apply repayment directly to previous cell's principal)
+                        // For borrowals on anniversary date, we DO calculate interest (to show period before borrowal)
+                        const isRepaymentOnAnniversary =
+                          tx.type === "payment" &&
+                          yearEnd &&
+                          txDate.getTime() === yearEnd.getTime();
+
+                        // Calculate interest between transactions
+                        // CRITICAL FIX: Even when repayment is on anniversary date, we still need to show the interest cell
+                        // The interest from previous transaction (or year start) to anniversary should be displayed
+                        // Calculate interest even if currentPrincipal is 0 (will result in 0 interest, but shows the period)
+                        // Also show interest cell even if dates are the same (0 days, 0 interest)
+
+                        // Determine the principal and start date for interest calculation
+                        let principalForInterestRN: number;
+                        let interestFromRN: Date;
+
+                        if (isRepaymentOnAnniversary && i === 1) {
+                          // Payment on anniversary, and this is the second transaction
+                          // Check if first transaction was on year start date
+                          const firstTx = yearTxs[0];
+                          const firstTxDate = firstTx
+                            ? startOfDay(new Date(firstTx.date))
+                            : null;
+                          const firstTxOnYearStart =
+                            firstTxDate &&
+                            firstTxDate.getTime() === yearStart!.getTime();
+
+                          if (firstTxOnYearStart) {
+                            // First transaction was on year start - calculate from year start
+                            // For Year 1: use principal after first transaction
+                            // For Year 2+: use initial principal from previous year
+                            const prevYearSummary = summaries.find(
+                              (s) => s.yearNumber === yearNum - 1
+                            );
+                            if (prevYearSummary) {
+                              // Year 2+: use initial principal
+                              principalForInterestRN = Math.max(
+                                0,
+                                prevYearSummary.newPrincipal
+                              );
+                            } else {
+                              // Year 1: use principal after first transaction
+                              principalForInterestRN = Math.max(
+                                0,
+                                principalAfterTxRN
+                              );
+                            }
+                            interestFromRN = yearStart!;
+                          } else {
+                            // Normal case: use principal after previous transaction
+                            principalForInterestRN = Math.max(
+                              0,
+                              principalAfterTxRN
+                            );
+                            interestFromRN = from;
+                          }
+                        } else {
+                          // Normal case: use principal after previous transaction
+                          principalForInterestRN = Math.max(
+                            0,
+                            principalAfterTxRN
+                          );
+                          interestFromRN = from;
+                        }
+
+                        // Always render the interest cell (even for repayment on anniversary)
+                        let res;
+                        let days = 0;
+
+                        if (to.getTime() > interestFromRN.getTime()) {
+                          // There's a gap - calculate interest
+                          res = calculateInterestWithAnnualCompounding(
+                            principalForInterestRN,
                             rate * 100,
-                            from,
+                            interestFromRN,
                             to
                           );
-                          const days = diffDaysExclusive(from, to);
-                          rendered.push(
-                            <View
-                              key={`int-${yearNum}-${i}-${tx.id}`}
-                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
-                            >
-                              <Text className="text-[11px] font-semibold mb-1">
-                                {`Current Principal: ₹${formatCurrency(currentPrincipal)}`}
-                              </Text>
-                              <Text className="text-[10px] text-muted-foreground">
-                                {`From: ${from.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
-                              </Text>
-                              <View className="mt-2 flex-row justify-between items-end">
-                                <View>
-                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
-                                </View>
-                                <View className="items-end">
-                                  <Text className="text-[10px] text-muted-foreground">
-                                    Interest
-                                  </Text>
-                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
-                                </View>
+                          days = diffDaysExclusive(interestFromRN, to);
+                        } else {
+                          // Same date - show 0 days and 0 interest
+                          res = {
+                            interest: 0,
+                            finalPrincipal: principalForInterestRN,
+                          };
+                        }
+
+                        rendered.push(
+                          <View
+                            key={`int-${yearNum}-${i}-${tx.id}`}
+                            className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                          >
+                            <Text className="text-[11px] font-semibold mb-1">
+                              {`Current Principal: ₹${formatCurrency(principalForInterestRN)}`}
+                            </Text>
+                            <Text className="text-[10px] text-muted-foreground">
+                              {`From: ${interestFromRN.toLocaleDateString()} → To: ${to.toLocaleDateString()}`}
+                            </Text>
+                            <View className="mt-2 flex-row justify-between items-end">
+                              <View>
+                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                              </View>
+                              <View className="items-end">
+                                <Text className="text-[10px] text-muted-foreground">
+                                  Interest
+                                </Text>
+                                <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
                               </View>
                             </View>
-                          );
+                          </View>
+                        );
+                        // Track the principal displayed in this interest cell
+                        lastDisplayedPrincipalRN = principalForInterestRN;
+                        // Update currentPrincipal with interest for next period
+                        if (
+                          principalForInterestRN > 0 &&
+                          to.getTime() > interestFromRN.getTime()
+                        ) {
                           currentPrincipal = res.finalPrincipal;
-                          // Track interest for final year
-                          if (
-                            finalYearStart &&
-                            from.getTime() >= finalYearStart.getTime()
-                          ) {
-                            finalYearInterestForTotal += res.interest;
-                          }
+                        } else {
+                          currentPrincipal = principalForInterestRN;
+                        }
+                        // Track interest for final year
+                        if (
+                          finalYearStart &&
+                          interestFromRN.getTime() >= finalYearStart.getTime()
+                        ) {
+                          finalYearInterestForTotal += res.interest;
+                        }
+
+                        // If repayment is on anniversary, we still update currentPrincipal for the repayment
+                        if (isRepaymentOnAnniversary) {
+                          // The repayment will be applied to lastDisplayedPrincipalRN (previous cell's principal)
+                          // But we've already updated currentPrincipal above, so we need to adjust
+                          currentPrincipal = lastDisplayedPrincipalRN;
                         }
                       }
 
                       // Render transaction cell
+                      // Apply transaction to the correct principal:
+                      // - If repayment on anniversary: use lastDisplayedPrincipalRN (previous cell's principal)
+                      // - Otherwise: use principalAfterTxRN (principal after previous transaction, before interest)
+                      // This ensures we don't add interest before applying the transaction
+                      const principalBeforeTxRN =
+                        tx.type === "payment" &&
+                        yearEnd &&
+                        txDate.getTime() === yearEnd.getTime()
+                          ? lastDisplayedPrincipalRN // Repayment on anniversary: use previous cell's principal
+                          : principalAfterTxRN; // Otherwise: use principal after previous transaction (before interest)
+
                       currentPrincipal =
                         tx.type === "payment"
-                          ? Math.max(0, currentPrincipal - tx.amount)
-                          : currentPrincipal + tx.amount;
+                          ? Math.max(0, principalBeforeTxRN - tx.amount)
+                          : principalBeforeTxRN + tx.amount;
+
+                      // Track principal after this transaction (before interest for next period)
+                      // This is the value that should be shown in the last cell
+                      principalAfterTxRN = currentPrincipal;
 
                       // Track principal after last transaction in final year
                       if (
@@ -2405,7 +2991,8 @@ export default function Index() {
                     }
 
                     // Render final segment from last transaction to min(year-end, Calculate-upto)
-                    // Only if there's a year summary (yearEnd exists) and we have transactions
+                    // Always render this cell if last transaction is on anniversary date (even if 0 days)
+                    // This works for both borrowals (receipts) and repayments (payments) on the anniversary date
                     if (yearSummary && yearTxs.length > 0 && yearEnd) {
                       const lastTx = yearTxs[yearTxs.length - 1];
                       const lastTxDate = startOfDay(new Date(lastTx.date));
@@ -2414,12 +3001,71 @@ export default function Index() {
                           ? endDate
                           : yearEnd;
 
-                      if (finalSegmentEnd.getTime() > lastTxDate.getTime()) {
-                        const principalAfterLastTx =
-                          lastTx.type === "payment"
-                            ? Math.max(0, currentPrincipal)
-                            : currentPrincipal;
+                      // SPECIAL CASE: If there's only one transaction and it's on year start,
+                      // calculate interest from year start to anniversary using principal after transaction
+                      // This matches the summary calculation logic
+                      const isSingleTxOnYearStart =
+                        yearTxs.length === 1 &&
+                        lastTxDate.getTime() === yearStart!.getTime();
 
+                      // Get principal after last transaction (without interest)
+                      // This should be the principal after the last transaction, before any interest calculations
+                      // Use principalAfterTxRN which tracks principal after each transaction (before interest)
+                      const principalAfterLastTx = principalAfterTxRN;
+
+                      if (
+                        isSingleTxOnYearStart &&
+                        finalSegmentEnd.getTime() > lastTxDate.getTime()
+                      ) {
+                        // Only one transaction on year start - calculate interest from year start to anniversary
+                        // using principal after the transaction (matches summary calculation)
+                        if (principalAfterLastTx > 0) {
+                          const res = calculateInterestWithAnnualCompounding(
+                            principalAfterLastTx,
+                            rate * 100,
+                            yearStart!,
+                            finalSegmentEnd
+                          );
+                          const days = diffDaysExclusive(
+                            yearStart!,
+                            finalSegmentEnd
+                          );
+                          rendered.push(
+                            <View
+                              key={`int-${yearNum}-final`}
+                              className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                            >
+                              <Text className="text-[11px] font-semibold mb-1">
+                                {`Current Principal: ₹${formatCurrency(principalAfterLastTx)}`}
+                              </Text>
+                              <Text className="text-[10px] text-muted-foreground">
+                                {`From: ${yearStart!.toLocaleDateString()} → To: ${finalSegmentEnd.toLocaleDateString()}`}
+                              </Text>
+                              <View className="mt-2 flex-row justify-between items-end">
+                                <View>
+                                  <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                                </View>
+                                <View className="items-end">
+                                  <Text className="text-[10px] text-muted-foreground">
+                                    Interest
+                                  </Text>
+                                  <Text className="text-xs font-bold">{`₹${formatCurrency(res.interest)}`}</Text>
+                                </View>
+                              </View>
+                            </View>
+                          );
+                          // Track interest for final year
+                          if (
+                            finalYearStart &&
+                            yearStart!.getTime() >= finalYearStart.getTime()
+                          ) {
+                            finalYearInterestForTotal += res.interest;
+                          }
+                        }
+                      } else if (
+                        finalSegmentEnd.getTime() > lastTxDate.getTime()
+                      ) {
+                        // There's a gap - calculate interest
                         if (principalAfterLastTx > 0) {
                           const res = calculateInterestWithAnnualCompounding(
                             principalAfterLastTx,
@@ -2463,6 +3109,36 @@ export default function Index() {
                             finalYearInterestForTotal += res.interest;
                           }
                         }
+                      } else if (
+                        finalSegmentEnd.getTime() === lastTxDate.getTime()
+                      ) {
+                        // Same date - show 0 days and ₹0 interest
+                        // Always show this cell regardless of principal amount (works for both borrowals and repayments)
+                        const days = 0;
+                        rendered.push(
+                          <View
+                            key={`int-${yearNum}-final`}
+                            className="mb-2 p-2 rounded bg-blue-50 dark:bg-blue-900/30"
+                          >
+                            <Text className="text-[11px] font-semibold mb-1">
+                              {`Current Principal: ₹${formatCurrency(principalAfterLastTx)}`}
+                            </Text>
+                            <Text className="text-[10px] text-muted-foreground">
+                              {`From: ${lastTxDate.toLocaleDateString()} → To: ${finalSegmentEnd.toLocaleDateString()}`}
+                            </Text>
+                            <View className="mt-2 flex-row justify-between items-end">
+                              <View>
+                                <Text className="text-xs text-muted-foreground">{`Period: ${days} days`}</Text>
+                              </View>
+                              <View className="items-end">
+                                <Text className="text-[10px] text-muted-foreground">
+                                  Interest
+                                </Text>
+                                <Text className="text-xs font-bold">{`₹${formatCurrency(0)}`}</Text>
+                              </View>
+                            </View>
+                          </View>
+                        );
                       }
                     }
                     if (yearSummary) {
