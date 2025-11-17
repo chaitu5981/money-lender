@@ -6,6 +6,37 @@ import { ActivityIndicator, Appearance, View } from "react-native";
 import "../global.css";
 import { ThemeProvider, useTheme } from "../lib/theme-context";
 
+// Suppress harmless expo-keep-awake errors (common in development/web)
+if (typeof ErrorUtils !== "undefined") {
+  const originalHandler = ErrorUtils.getGlobalHandler();
+  ErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
+    if (
+      error?.message?.includes("Unable to activate keep awake") ||
+      error?.message?.includes("keep awake")
+    ) {
+      // Silently ignore keep-awake errors - they're harmless
+      return;
+    }
+    // Call original handler for other errors
+    if (originalHandler) {
+      originalHandler(error, isFatal);
+    }
+  });
+}
+
+// Also handle unhandled promise rejections (common for keep-awake errors)
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("unhandledrejection", (event) => {
+    if (
+      event.reason?.message?.includes("Unable to activate keep awake") ||
+      event.reason?.message?.includes("keep awake")
+    ) {
+      // Prevent the error from showing in console
+      event.preventDefault();
+    }
+  });
+}
+
 // Keep the splash screen visible while we fetch resources
 SplashScreen.preventAutoHideAsync();
 

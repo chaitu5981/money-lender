@@ -266,6 +266,99 @@ export default function Index() {
     });
   };
 
+  // Helper function to combine transactions on the same day for report/calculation
+  // Groups transactions by date and creates a single net transaction per day
+  const combineTransactionsByDate = (
+    transactions: {
+      date: string;
+      amount: number;
+      type: "payment" | "receipt";
+      id: string;
+    }[]
+  ): {
+    date: string;
+    amount: number;
+    type: "payment" | "receipt";
+    id: string;
+  }[] => {
+    // Group transactions by date
+    const transactionsByDate = new Map<
+      string,
+      { amount: number; type: "payment" | "receipt"; id: string }[]
+    >();
+
+    transactions.forEach((tx) => {
+      const dateKey = startOfDay(new Date(tx.date)).toISOString();
+      if (!transactionsByDate.has(dateKey)) {
+        transactionsByDate.set(dateKey, []);
+      }
+      transactionsByDate
+        .get(dateKey)!
+        .push({ amount: tx.amount, type: tx.type, id: tx.id });
+    });
+
+    // Combine transactions on the same day
+    const combined: {
+      date: string;
+      amount: number;
+      type: "payment" | "receipt";
+      id: string;
+    }[] = [];
+
+    transactionsByDate.forEach((txs, dateKey) => {
+      // Calculate net amount: sum of borrowals - sum of repayments
+      let netAmount = 0;
+      txs.forEach((tx) => {
+        if (tx.type === "receipt") {
+          netAmount += tx.amount; // Borrowal adds to net
+        } else {
+          netAmount -= tx.amount; // Repayment subtracts from net
+        }
+      });
+
+      // Determine type based on net amount
+      // If net amount <= 0, it's a repayment, otherwise it's a borrowal
+      const type: "payment" | "receipt" =
+        netAmount <= 0 ? "payment" : "receipt";
+      const amount = Math.abs(netAmount);
+
+      // Use the first transaction's ID or create a combined ID
+      const combinedId = `combined-${dateKey}-${txs[0].id}`;
+
+      combined.push({
+        date: dateKey,
+        amount,
+        type,
+        id: combinedId,
+      });
+    });
+
+    // Sort by date
+    return combined.sort((a, b) => {
+      return new Date(a.date).getTime() - new Date(b.date).getTime();
+    });
+  };
+
+  // Helper function to validate and filter input for amounts (only digits)
+  const validateAmountInput = (text: string): string => {
+    // Remove all non-digit characters
+    return text.replace(/[^0-9]/g, "");
+  };
+
+  // Helper function to validate and filter input for interest rate (digits and decimal point)
+  const validateInterestRateInput = (text: string): string => {
+    // Allow digits and a single decimal point
+    // Remove any character that's not a digit or decimal point
+    let filtered = text.replace(/[^0-9.]/g, "");
+    // Ensure only one decimal point
+    const parts = filtered.split(".");
+    if (parts.length > 2) {
+      // More than one decimal point, keep only the first one
+      filtered = parts[0] + "." + parts.slice(1).join("");
+    }
+    return filtered;
+  };
+
   const handlePaymentSubmit = async () => {
     if (!paymentAmount || parseFloat(paymentAmount) <= 0) return;
 
@@ -280,6 +373,50 @@ export default function Index() {
         );
         return;
       }
+    }
+
+    // Validate: First transaction (chronologically) must be a borrowal, not a repayment
+    const allTransactions = [
+      ...payments.map((t) => ({ ...t, type: "payment" as const })),
+      ...receipts.map((t) => ({ ...t, type: "receipt" as const })),
+    ];
+
+    // Create a temporary transaction for the new/updated payment
+    const tempPayment: Transaction = editingPaymentId
+      ? {
+          id: editingPaymentId,
+          amount: parseFloat(paymentAmount),
+          date: paymentDate.toISOString(),
+          type: "payment",
+        }
+      : {
+          id: "temp",
+          amount: parseFloat(paymentAmount),
+          date: paymentDate.toISOString(),
+          type: "payment",
+        };
+
+    // Remove the payment being edited from the list (if editing)
+    const transactionsWithoutCurrent = editingPaymentId
+      ? allTransactions.filter((t) => t.id !== editingPaymentId)
+      : allTransactions;
+
+    // Add the new/updated payment
+    const allTransactionsWithNew = [...transactionsWithoutCurrent, tempPayment];
+
+    // Sort chronologically
+    const sortedTransactions = sortTransactionsByDate(allTransactionsWithNew);
+
+    // Check if the first transaction is a payment (repayment)
+    if (
+      sortedTransactions.length > 0 &&
+      sortedTransactions[0].type === "payment"
+    ) {
+      Alert.alert(
+        "Invalid Transaction",
+        "The first transaction (chronologically) must be a borrowal, not a repayment. Please add a borrowal first or change the date of this repayment."
+      );
+      return;
     }
 
     let updatedPayments: Transaction[];
@@ -384,6 +521,50 @@ export default function Index() {
       }
     }
 
+    // Validate: If editing a receipt and changing its date, ensure first transaction is still a borrowal
+    if (editingReceiptId) {
+      const allTransactions = [
+        ...payments.map((t) => ({ ...t, type: "payment" as const })),
+        ...receipts.map((t) => ({ ...t, type: "receipt" as const })),
+      ];
+
+      // Create a temporary receipt for the updated receipt
+      const tempReceipt: Transaction = {
+        id: editingReceiptId,
+        amount: parseFloat(receiptAmount),
+        date: receiptDate.toISOString(),
+        type: "receipt",
+      };
+
+      // Remove the receipt being edited from the list
+      const transactionsWithoutCurrent = allTransactions.filter(
+        (t) => t.id !== editingReceiptId
+      );
+
+      // Add the updated receipt
+      const allTransactionsWithUpdated = [
+        ...transactionsWithoutCurrent,
+        tempReceipt,
+      ];
+
+      // Sort chronologically
+      const sortedTransactions = sortTransactionsByDate(
+        allTransactionsWithUpdated
+      );
+
+      // Check if the first transaction is a payment (repayment)
+      if (
+        sortedTransactions.length > 0 &&
+        sortedTransactions[0].type === "payment"
+      ) {
+        Alert.alert(
+          "Invalid Transaction",
+          "The first transaction (chronologically) must be a borrowal, not a repayment. Please change the date of this borrowal or ensure there's a borrowal before the first repayment."
+        );
+        return;
+      }
+    }
+
     let updatedReceipts: Transaction[];
 
     if (editingReceiptId) {
@@ -438,6 +619,37 @@ export default function Index() {
   };
 
   const handleDeleteReceipt = async (receiptId: string) => {
+    // Validate: Check if deleting this receipt would leave a payment as the first transaction
+    const receiptToDelete = receipts.find((r) => r.id === receiptId);
+    if (receiptToDelete) {
+      const allTransactions = [
+        ...payments.map((t) => ({ ...t, type: "payment" as const })),
+        ...receipts.map((t) => ({ ...t, type: "receipt" as const })),
+      ];
+
+      // Remove the receipt being deleted
+      const transactionsAfterDelete = allTransactions.filter(
+        (t) => t.id !== receiptId
+      );
+
+      // Sort chronologically
+      const sortedTransactions = sortTransactionsByDate(
+        transactionsAfterDelete
+      );
+
+      // Check if the first transaction would be a payment (repayment)
+      if (
+        sortedTransactions.length > 0 &&
+        sortedTransactions[0].type === "payment"
+      ) {
+        Alert.alert(
+          "Cannot Delete",
+          "Cannot delete this borrowal because it would leave a repayment as the first transaction. The first transaction (chronologically) must be a borrowal."
+        );
+        return;
+      }
+    }
+
     Alert.alert(
       "Delete Borrowal",
       "Are you sure you want to delete this borrowal?",
@@ -555,12 +767,17 @@ export default function Index() {
         ? startOfDay(new Date(calculationEndDate))
         : startOfDay(new Date());
 
-      // Combine and sort all transactions by date
-      // When dates are the same, borrowals (receipts) come before repayments (payments)
-      const allTransactions = sortCombinedTransactions([
+      // For calculation/report: Combine transactions on the same day into a single net transaction
+      // This ensures that multiple transactions on the same day are treated as one transaction
+      // Net amount = sum of borrowals - sum of repayments
+      // If net <= 0, it's a repayment; if net > 0, it's a borrowal
+      const allTransactionsForCalculation = combineTransactionsByDate([
         ...currentPayments.map((t) => ({ ...t, type: "payment" as const })),
         ...currentReceipts.map((t) => ({ ...t, type: "receipt" as const })),
       ]);
+
+      // Use combined transactions for calculation
+      const allTransactions = allTransactionsForCalculation;
 
       let principal = 0;
       let totalInterest = 0;
@@ -772,6 +989,8 @@ export default function Index() {
               // Track principal after each transaction (before interest) for the last cell
               let lastDisplayedPrincipalForCalc = calcPrincipal;
               let principalAfterTxForCalc = calcPrincipal; // Track principal after each transaction (before interest)
+              let principalBeforeLastInterestCalc = calcPrincipal; // Track principal before the last interest calculation
+              let principalAfterLastTxOnAnniversary: number | null = null; // Track principal after last transaction if it's on anniversary (0-day cell)
               let transactionIndex = 0; // Track transaction index to identify first transaction
               for (const t of yearTxsForPrincipal) {
                 const txDate = startOfDay(new Date(t.date));
@@ -819,6 +1038,8 @@ export default function Index() {
                   recalculatedTotalInterest += res.interest;
                   // Track the principal displayed in this interest cell
                   lastDisplayedPrincipalForCalc = principalForInterest;
+                  // Track principal before this interest calculation (for year summary)
+                  principalBeforeLastInterestCalc = principalForInterest;
                   // Update calcPrincipal with interest for next period
                   const principalToCheck = principalForInterest;
                   if (
@@ -854,6 +1075,8 @@ export default function Index() {
                     recalculatedTotalInterest = fullYearRes.interest;
                     calcPrincipal = fullYearRes.finalPrincipal;
                     lastDisplayedPrincipalForCalc = principalAfterFirstTx;
+                    // Track principal before this interest calculation (for year summary)
+                    principalBeforeLastInterestCalc = principalAfterFirstTx;
                     // Update principalAfterTxForCalc to reflect the transaction
                     principalAfterTxForCalc = principalAfterFirstTx;
                   }
@@ -909,6 +1132,8 @@ export default function Index() {
                   recalculatedTotalInterest += res.interest;
                   // Track the principal displayed in this interest cell
                   lastDisplayedPrincipalForCalc = principalForInterest;
+                  // Track principal before this interest calculation (for year summary)
+                  principalBeforeLastInterestCalc = principalForInterest;
                   // Update calcPrincipal with interest for next period
                   // Use principalAfterTxForCalc (principal after previous transaction, before interest)
                   // But if we calculated from year start using initial principal, use that for updating
@@ -985,28 +1210,73 @@ export default function Index() {
 
                   recalculatedTotalInterest += res.interest;
                   lastDisplayedPrincipalForCalc = principalForInterest;
+                  // Track principal before this interest calculation (for year summary)
+                  principalBeforeLastInterestCalc = principalForInterest;
 
-                  // Use the principal displayed in the previous interest cell for applying repayment
-                  // This ensures we apply repayment to the correct principal (previous cell's displayed principal)
-                  calcPrincipal = lastDisplayedPrincipalForCalc;
+                  // For repayment on anniversary, calcPrincipal should be the principal AFTER the interest calculation
+                  // This represents the principal from the last calculation cell (after interest)
+                  // The transaction will be applied to this principal
+                  calcPrincipal = res.finalPrincipal; // Principal after interest calculation
                 }
                 // Apply transaction (even if on the same date as lastCalcDate or on anniversary)
                 // Apply transaction to the correct principal:
-                // - If repayment on anniversary: use lastDisplayedPrincipalForCalc (previous cell's principal)
+                // - If repayment on anniversary: use calcPrincipal (which is principal after the interest calculation)
                 // - Otherwise: use principalAfterTxForCalc (principal after previous transaction, before interest)
-                // This ensures we don't add interest before applying the transaction
+                // This ensures we apply the transaction to the principal from the last calculation cell
                 const principalBeforeTxForCalc =
                   t.type === "payment" &&
                   txDate.getTime() === startOfDay(event.date).getTime()
-                    ? lastDisplayedPrincipalForCalc // Repayment on anniversary: use previous cell's principal
+                    ? calcPrincipal // Repayment on anniversary: use principal after the interest calculation
                     : principalAfterTxForCalc; // Otherwise: use principal after previous transaction (before interest)
 
-                calcPrincipal =
+                // Calculate principal after transaction (BEFORE interest) - this is what we need for principalAfterTxForCalc
+                const principalAfterTxOnly =
                   t.type === "payment"
                     ? Math.max(0, principalBeforeTxForCalc - t.amount)
                     : principalBeforeTxForCalc + t.amount;
+
+                // CRITICAL: If this transaction is on the anniversary date, it creates a calculation cell (even if 0 days)
+                // We need to track the principal before this transaction for the calculation cell
+                // This ensures 0-day calculation cells are properly considered
+                const txOnAnniversary =
+                  txDate.getTime() === startOfDay(event.date).getTime();
+                if (txOnAnniversary) {
+                  if (isRepaymentOnAnniversary) {
+                    // Repayment on anniversary - the "current principal" shown in the 0-day cell is principalAfterTxOnly
+                    // But principalAfterTxOnly = calcPrincipal - repayment, and calcPrincipal = principalBeforeLastInterestCalc + interest
+                    // So principalAfterTxOnly = principalBeforeLastInterestCalc + interest - repayment
+                    // To avoid double-counting (interest is already in totalYearInterest), we subtract the interest:
+                    // current principal = principalAfterTxOnly - interest = principalBeforeLastInterestCalc - repayment
+                    // At this point, calcPrincipal is still res.finalPrincipal (principal after interest)
+                    const interestJustCalculated =
+                      calcPrincipal - principalBeforeLastInterestCalc;
+                    const principalWithoutInterest =
+                      principalAfterTxOnly - interestJustCalculated;
+                    principalAfterLastTxOnAnniversary =
+                      principalWithoutInterest;
+                  } else {
+                    // Borrowal on anniversary (not a repayment) - creates a calculation cell
+                    // The principal before this transaction is what we need for the calculation cell
+                    // For borrowals, if we didn't calculate interest (same date as previous),
+                    // principalBeforeTxForCalc is the principal before this transaction
+                    // Update principalBeforeLastInterestCalc to track this 0-day calculation cell
+                    principalBeforeLastInterestCalc = principalBeforeTxForCalc;
+
+                    // For borrowals on anniversary, store the principal after the transaction
+                    // This is the "current principal" shown in the 0-day calculation cell
+                    principalAfterLastTxOnAnniversary = principalAfterTxOnly;
+                  }
+                }
+
+                // Update calcPrincipal to reflect principal after transaction
+                // For anniversary repayments, this will be: (principal after interest) - payment amount
+                // For other cases, this will be: principal after transaction (before next interest)
+                calcPrincipal = principalAfterTxOnly;
+
                 // Track principal after this transaction (before interest for next period)
-                principalAfterTxForCalc = calcPrincipal;
+                // CRITICAL: Use principalAfterTxOnly, not calcPrincipal, to ensure we never include interest
+                principalAfterTxForCalc = principalAfterTxOnly;
+
                 // Update lastCalcDate to transaction date
                 lastCalcDate = txDate;
                 // Increment transaction index for next iteration
@@ -1048,6 +1318,8 @@ export default function Index() {
                   yearEndDate
                 );
                 recalculatedTotalInterest += finalRes.interest;
+                // Track principal before this interest calculation (for year summary)
+                principalBeforeLastInterestCalc = initialPrincipal;
                 calcPrincipal = finalRes.finalPrincipal;
                 segmentInterest = finalRes.interest;
               }
@@ -1082,6 +1354,8 @@ export default function Index() {
                     startOfDay(event.date)
                   );
                   recalculatedTotalInterest += finalRes.interest;
+                  // Track principal before this interest calculation (for year summary)
+                  principalBeforeLastInterestCalc = calcPrincipal;
                   calcPrincipal = finalRes.finalPrincipal; // Update calcPrincipal with final segment interest
                   // Update segmentInterest to match the recalculated value
                   segmentInterest = finalRes.interest;
@@ -1112,6 +1386,8 @@ export default function Index() {
                     yearEndDate
                   );
                   recalculatedTotalInterest = fallbackRes.interest;
+                  // Track principal before this interest calculation (for year summary)
+                  principalBeforeLastInterestCalc = initialPrincipal;
                   calcPrincipal = fallbackRes.finalPrincipal;
                   segmentInterest = fallbackRes.interest;
                 }
@@ -1119,13 +1395,53 @@ export default function Index() {
 
               const totalYearInterest = recalculatedTotalInterest;
 
-              // New Principal = Latest Current Principal (after all transactions) + Total Year Interest
-              // The latest current principal should be the principal after ALL transactions in the year
-              // principalAfterTxForCalc tracks the principal after each transaction (before interest)
-              // At the end of the transaction loop, it should be the principal after the last transaction
-              // Use principalAfterTxForCalc as it's guaranteed to be the principal after transactions (before interest)
-              // calcPrincipal might be modified to include interest in final segment calculation, so we use principalAfterTxForCalc
-              const latestCurrentPrincipal = principalAfterTxForCalc;
+              // New Principal = Current Principal (from last calculation cell) + Current Year Interest
+              // The current principal should be the principal from the last calculation cell
+              // A 0-day interest calculation cell (transaction on same date) IS still a calculation cell
+              // If the last transaction is on the anniversary date, it creates a calculation cell (even if 0 days)
+              // In that case, we should use the principal AFTER that transaction (which is calcPrincipal)
+              // Otherwise, we use the principal BEFORE the last interest calculation
+              const lastTx =
+                yearTxsForPrincipal[yearTxsForPrincipal.length - 1];
+              const lastTxDate = lastTx
+                ? startOfDay(new Date(lastTx.date))
+                : null;
+              const lastTxOnAnniversary =
+                lastTxDate &&
+                lastTxDate.getTime() === startOfDay(event.date).getTime();
+
+              // Check if there's a final segment calculation (gap before anniversary)
+              // If there's a final segment, it's the last calculation cell
+              // Otherwise, if last transaction is on anniversary, that transaction's calculation cell is the last one
+              const hasFinalSegment =
+                calcPrincipal > 0 &&
+                lastCalcDate.getTime() < startOfDay(event.date).getTime() &&
+                !(
+                  yearTxsForPrincipal.length === 1 &&
+                  lastTxDate &&
+                  lastTxDate.getTime() === currentYearStart.getTime()
+                );
+
+              // Determine the current principal from the last calculation cell:
+              // 1. If there's a final segment, use principal before that final segment (principalBeforeLastInterestCalc was updated)
+              // 2. If last transaction is on anniversary (creates a 0-day calculation cell), use principal after that transaction
+              //    This is the "current principal" shown in the 0-day calculation cell (e.g., 75000)
+              // 3. Otherwise, use principal before last interest calculation
+              let latestCurrentPrincipal: number;
+              if (hasFinalSegment) {
+                // Final segment is the last calculation cell - use principal before that calculation
+                latestCurrentPrincipal = principalBeforeLastInterestCalc;
+              } else if (
+                lastTxOnAnniversary &&
+                principalAfterLastTxOnAnniversary !== null
+              ) {
+                // Last transaction is on anniversary - creates a 0-day calculation cell
+                // Use the principal after that transaction (current principal of that 0-day cell, e.g., 75000)
+                latestCurrentPrincipal = principalAfterLastTxOnAnniversary;
+              } else {
+                // Use principal before last interest calculation
+                latestCurrentPrincipal = principalBeforeLastInterestCalc;
+              }
 
               const newPrincipalManual =
                 latestCurrentPrincipal + totalYearInterest;
@@ -1493,10 +1809,12 @@ export default function Index() {
         return;
       }
 
-      // Sort transactions: when dates are the same, borrowals come before repayments
-      const sortedTransactions = sortCombinedTransactions([
+      // For report: Combine transactions on the same day into a single net transaction
+      // This matches the calculation logic where same-day transactions are combined
+      const combinedTransactionsForReport = combineTransactionsByDate([
         ...combinedTransactions,
       ]);
+      const sortedTransactions = combinedTransactionsForReport;
       const sortedSummaries = [...yearSummaries].sort(
         (a, b) => new Date(a.toDate).getTime() - new Date(b.toDate).getTime()
       );
@@ -2253,11 +2571,12 @@ export default function Index() {
             <Input
               value={interestRate}
               onChangeText={(text) => {
-                setInterestRate(text);
-                saveInterestRate(text);
+                const validated = validateInterestRateInput(text);
+                setInterestRate(validated);
+                saveInterestRate(validated);
               }}
-              keyboardType="numeric"
-              placeholder="Enter interest rate (e.g., 10)"
+              keyboardType="decimal-pad"
+              placeholder="Enter interest rate (e.g., 10, 10.5, or 120)"
             />
           </View>
           <View className="mt-2">
@@ -2305,7 +2624,7 @@ export default function Index() {
                   ) {
                     Alert.alert(
                       "Invalid Interest Rate",
-                      "Please enter a valid interest rate greater than 0."
+                      "Please enter a valid interest rate greater than 0. Rates of 100% or higher are allowed."
                     );
                     return;
                   }
@@ -2526,8 +2845,9 @@ export default function Index() {
 
               <View>
                 {(() => {
-                  // Combine and sort transactions: when dates are the same, borrowals come before repayments
-                  const combined = sortCombinedTransactions([
+                  // For report: Combine transactions on the same day into a single net transaction
+                  // This matches the calculation logic where same-day transactions are combined
+                  const combined = combineTransactionsByDate([
                     ...payments.map((t) => ({
                       ...t,
                       type: "payment" as const,
@@ -3453,8 +3773,11 @@ export default function Index() {
           <Input
             label="Repayment Amount (₹)"
             value={paymentAmount}
-            onChangeText={setPaymentAmount}
-            keyboardType="numeric"
+            onChangeText={(text) => {
+              const validated = validateAmountInput(text);
+              setPaymentAmount(validated);
+            }}
+            keyboardType="number-pad"
             placeholder="0"
           />
           <View className="mt-4">
@@ -3519,8 +3842,11 @@ export default function Index() {
           <Input
             label="Borrowal Amount (₹)"
             value={receiptAmount}
-            onChangeText={setReceiptAmount}
-            keyboardType="numeric"
+            onChangeText={(text) => {
+              const validated = validateAmountInput(text);
+              setReceiptAmount(validated);
+            }}
+            keyboardType="number-pad"
             placeholder="0"
           />
           <View className="mt-4">
