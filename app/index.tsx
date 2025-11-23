@@ -1,10 +1,25 @@
+import { CalculatedResults } from "@/components/calculations/CalculatedResults";
+import { TransactionModal } from "@/components/transactions/TransactionModal";
+import { TransactionTable } from "@/components/transactions/TransactionTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Modal } from "@/components/ui/modal";
 import { Text } from "@/components/ui/text";
+import { useStorage } from "@/lib/hooks/useStorage";
 import { useTheme } from "@/lib/theme-context";
+import { Transaction } from "@/lib/types";
+import { formatCurrency } from "@/lib/utils/currency";
+import {
+  addCalendarYears,
+  diffDaysExclusive,
+  startOfDay,
+} from "@/lib/utils/date";
+import {
+  combineTransactionsByDate,
+  sortCombinedTransactions,
+  sortTransactionsByDate,
+} from "@/lib/utils/transactions";
+import { validateInterestRateInput } from "@/lib/utils/validation";
 import { MaterialIcons } from "@expo/vector-icons";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
@@ -12,91 +27,36 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Platform, ScrollView, StatusBar, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-interface Transaction {
-  id: string;
-  amount: number;
-  date: string; // ISO date string
-  type: "payment" | "receipt";
-}
-
-const STORAGE_KEYS = {
-  INTEREST_RATE: "@money_lender:interest_rate",
-  PAYMENTS: "@money_lender:payments",
-  RECEIPTS: "@money_lender:receipts",
-  CALCULATION_END_DATE: "@money_lender:calculation_end_date",
-};
-
-// Helper function to format currency safely (₹, no decimals)
-const formatCurrency = (amount: number | string | undefined): string => {
-  const toNumber = (val: number | string | undefined): number => {
-    if (typeof val === "number") return val;
-    if (typeof val === "string") {
-      const num = parseFloat(val);
-      return isNaN(num) ? 0 : num;
-    }
-    return 0;
-  };
-  const rounded = Math.round(toNumber(amount));
-  try {
-    // Indian numbering format without decimals
-    return rounded.toLocaleString("en-IN", { maximumFractionDigits: 0 });
-  } catch {
-    return String(rounded);
-  }
-};
-
-// Normalize a date to local start of day (00:00:00.000)
-const startOfDay = (d: Date): Date => {
-  const nd = new Date(d);
-  nd.setHours(0, 0, 0, 0);
-  return nd;
-};
-
-// Add calendar years preserving month/day when possible
-// If the target month doesn't have the same day (e.g., Feb 29 → Feb end), clamp to last day of month
-const addCalendarYears = (d: Date, years: number): Date => {
-  const year = d.getFullYear() + years;
-  const month = d.getMonth();
-  const day = d.getDate();
-  const candidate = new Date(year, month, day);
-  if (candidate.getMonth() !== month) {
-    // Day overflowed (e.g., Feb 30). Use day 0 of next month which is last day of desired month
-    return new Date(year, month + 1, 0);
-  }
-  return candidate;
-};
-
-// Exclusive end day difference in whole days using normalized dates
-// Example: 1 Jul → 31 Jul returns 30
-const diffDaysExclusive = (start: Date, end: Date): number => {
-  const s = startOfDay(start).getTime();
-  const e = startOfDay(end).getTime();
-  return Math.max(0, Math.floor((e - s) / (1000 * 60 * 60 * 24)));
-};
-
 export default function Index() {
   const { colorScheme, toggleTheme } = useTheme();
-  const [interestRate, setInterestRate] = useState<string>("");
+  const {
+    interestRate,
+    payments,
+    receipts,
+    calculationEndDate,
+    isLoading,
+    setInterestRate,
+    setPayments,
+    setReceipts,
+    setCalculationEndDate,
+    saveInterestRate,
+    saveCalculationEndDate,
+    savePayments,
+    saveReceipts,
+    clearAllData,
+  } = useStorage();
+
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
-  const [payments, setPayments] = useState<Transaction[]>([]);
-  const [receipts, setReceipts] = useState<Transaction[]>([]);
-  const [calculationEndDate, setCalculationEndDate] = useState<Date | null>(
-    null
-  );
   const [showEndDatePicker, setShowEndDatePicker] = useState(false);
 
-  // Payment modal state
-  const [paymentAmount, setPaymentAmount] = useState<string>("");
-  const [paymentDate, setPaymentDate] = useState(new Date());
-  const [showPaymentDatePicker, setShowPaymentDatePicker] = useState(false);
-  const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
-
-  // Receipt modal state
-  const [receiptAmount, setReceiptAmount] = useState<string>("");
-  const [receiptDate, setReceiptDate] = useState(new Date());
-  const [showReceiptDatePicker, setShowReceiptDatePicker] = useState(false);
-  const [editingReceiptId, setEditingReceiptId] = useState<string | null>(null);
+  // Editing transaction state - keep in sync with modal visibility
+  const [editingPayment, setEditingPayment] = useState<Transaction | null>(
+    null
+  );
+  const [editingReceipt, setEditingReceipt] = useState<Transaction | null>(
+    null
+  );
 
   // Results
   const [calculatedInterest, setCalculatedInterest] = useState<number>(0); // Interest for "Total Amount Due" section
@@ -135,59 +95,7 @@ export default function Index() {
     }[]
   >([]);
 
-  // Load data from storage
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
-    try {
-      const [storedRate, storedPayments, storedReceipts, storedEndDate] =
-        await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.INTEREST_RATE),
-          AsyncStorage.getItem(STORAGE_KEYS.PAYMENTS),
-          AsyncStorage.getItem(STORAGE_KEYS.RECEIPTS),
-          AsyncStorage.getItem(STORAGE_KEYS.CALCULATION_END_DATE),
-        ]);
-
-      if (storedRate) setInterestRate(storedRate);
-      if (storedPayments) setPayments(JSON.parse(storedPayments));
-      if (storedReceipts) setReceipts(JSON.parse(storedReceipts));
-      if (storedEndDate) {
-        const parsedDate = new Date(storedEndDate);
-        if (!isNaN(parsedDate.getTime())) {
-          setCalculationEndDate(parsedDate);
-        }
-      }
-    } catch (error) {
-      // Error loading data
-    }
-  };
-
-  const saveInterestRate = async (rate: string) => {
-    try {
-      await AsyncStorage.setItem(STORAGE_KEYS.INTEREST_RATE, rate);
-      setInterestRate(rate);
-    } catch (error) {
-      // Error saving interest rate
-    }
-  };
-
-  const saveCalculationEndDate = async (date: Date | null) => {
-    try {
-      if (date) {
-        await AsyncStorage.setItem(
-          STORAGE_KEYS.CALCULATION_END_DATE,
-          date.toISOString()
-        );
-      } else {
-        await AsyncStorage.removeItem(STORAGE_KEYS.CALCULATION_END_DATE);
-      }
-      setCalculationEndDate(date);
-    } catch (error) {
-      // Error saving calculation end date
-    }
-  };
+  // Data is loaded via useStorage hook
 
   const handleClearData = async () => {
     Alert.alert(
@@ -199,172 +107,34 @@ export default function Index() {
           text: "Clear",
           style: "destructive",
           onPress: async () => {
-            try {
-              await AsyncStorage.multiRemove([
-                STORAGE_KEYS.INTEREST_RATE,
-                STORAGE_KEYS.PAYMENTS,
-                STORAGE_KEYS.RECEIPTS,
-                STORAGE_KEYS.CALCULATION_END_DATE,
-              ]);
-              setInterestRate("");
-              setPayments([]);
-              setReceipts([]);
-              setTransactionPeriods([]);
-              setYearSummaries([]);
-              setCalculatedInterest(0);
-              setCalculatedResultsInterest(0);
-              setCalculatedAmount(0);
-              setLoanAmount(0);
-              setCurrentPrincipalForTotal(0);
-              setCalculationDetails("");
-              setCalculationEndDate(null);
-              setHasCalculated(false);
-            } catch (error) {
-              // Error clearing data
-            }
+            await clearAllData();
+            setTransactionPeriods([]);
+            setYearSummaries([]);
+            setCalculatedInterest(0);
+            setCalculatedResultsInterest(0);
+            setCalculatedAmount(0);
+            setLoanAmount(0);
+            setCurrentPrincipalForTotal(0);
+            setCalculationDetails("");
+            setHasCalculated(false);
           },
         },
       ]
     );
   };
 
-  // Helper function to sort transactions by date
-  // When dates are the same, borrowals (receipts) come before repayments (payments)
-  const sortTransactionsByDate = (
-    transactions: Transaction[]
-  ): Transaction[] => {
-    return [...transactions].sort((a, b) => {
-      const dateA = new Date(a.date).getTime();
-      const dateB = new Date(b.date).getTime();
-      if (dateA !== dateB) {
-        return dateA - dateB;
-      }
-      // Same date: receipts (borrowals) come before payments (repayments)
-      // receipt type = 0, payment type = 1, so receipts sort first
-      const typeA = a.type === "receipt" ? 0 : 1;
-      const typeB = b.type === "receipt" ? 0 : 1;
-      return typeA - typeB;
-    });
-  };
+  // Helper functions are imported from lib/utils
 
-  // Helper function to sort combined transactions (with type property)
-  const sortCombinedTransactions = <
-    T extends { date: string; type: "payment" | "receipt" },
-  >(
-    transactions: T[]
-  ): T[] => {
-    return [...transactions].sort((a, b) => {
-      const dateA = new Date(a.date).getTime();
-      const dateB = new Date(b.date).getTime();
-      if (dateA !== dateB) {
-        return dateA - dateB;
-      }
-      // Same date: receipts (borrowals) come before payments (repayments)
-      const typeA = a.type === "receipt" ? 0 : 1;
-      const typeB = b.type === "receipt" ? 0 : 1;
-      return typeA - typeB;
-    });
-  };
-
-  // Helper function to combine transactions on the same day for report/calculation
-  // Groups transactions by date and creates a single net transaction per day
-  const combineTransactionsByDate = (
-    transactions: {
-      date: string;
-      amount: number;
-      type: "payment" | "receipt";
-      id: string;
-    }[]
-  ): {
-    date: string;
-    amount: number;
-    type: "payment" | "receipt";
-    id: string;
-  }[] => {
-    // Group transactions by date
-    const transactionsByDate = new Map<
-      string,
-      { amount: number; type: "payment" | "receipt"; id: string }[]
-    >();
-
-    transactions.forEach((tx) => {
-      const dateKey = startOfDay(new Date(tx.date)).toISOString();
-      if (!transactionsByDate.has(dateKey)) {
-        transactionsByDate.set(dateKey, []);
-      }
-      transactionsByDate
-        .get(dateKey)!
-        .push({ amount: tx.amount, type: tx.type, id: tx.id });
-    });
-
-    // Combine transactions on the same day
-    const combined: {
-      date: string;
-      amount: number;
-      type: "payment" | "receipt";
-      id: string;
-    }[] = [];
-
-    transactionsByDate.forEach((txs, dateKey) => {
-      // Calculate net amount: sum of borrowals - sum of repayments
-      let netAmount = 0;
-      txs.forEach((tx) => {
-        if (tx.type === "receipt") {
-          netAmount += tx.amount; // Borrowal adds to net
-        } else {
-          netAmount -= tx.amount; // Repayment subtracts from net
-        }
-      });
-
-      // Determine type based on net amount
-      // If net amount <= 0, it's a repayment, otherwise it's a borrowal
-      const type: "payment" | "receipt" =
-        netAmount <= 0 ? "payment" : "receipt";
-      const amount = Math.abs(netAmount);
-
-      // Use the first transaction's ID or create a combined ID
-      const combinedId = `combined-${dateKey}-${txs[0].id}`;
-
-      combined.push({
-        date: dateKey,
-        amount,
-        type,
-        id: combinedId,
-      });
-    });
-
-    // Sort by date
-    return combined.sort((a, b) => {
-      return new Date(a.date).getTime() - new Date(b.date).getTime();
-    });
-  };
-
-  // Helper function to validate and filter input for amounts (only digits)
-  const validateAmountInput = (text: string): string => {
-    // Remove all non-digit characters
-    return text.replace(/[^0-9]/g, "");
-  };
-
-  // Helper function to validate and filter input for interest rate (digits and decimal point)
-  const validateInterestRateInput = (text: string): string => {
-    // Allow digits and a single decimal point
-    // Remove any character that's not a digit or decimal point
-    let filtered = text.replace(/[^0-9.]/g, "");
-    // Ensure only one decimal point
-    const parts = filtered.split(".");
-    if (parts.length > 2) {
-      // More than one decimal point, keep only the first one
-      filtered = parts[0] + "." + parts.slice(1).join("");
-    }
-    return filtered;
-  };
-
-  const handlePaymentSubmit = async () => {
-    if (!paymentAmount || parseFloat(paymentAmount) <= 0) return;
+  const handlePaymentSubmit = async (
+    amount: string,
+    date: Date,
+    editingId: string | null
+  ) => {
+    if (!amount || parseFloat(amount) <= 0) return;
 
     // Validate: Transaction date cannot be after "calculate interest upto" date
     if (calculationEndDate) {
-      const txDate = startOfDay(paymentDate);
+      const txDate = startOfDay(date);
       const calcDate = startOfDay(calculationEndDate);
       if (txDate.getTime() > calcDate.getTime()) {
         Alert.alert(
@@ -382,23 +152,23 @@ export default function Index() {
     ];
 
     // Create a temporary transaction for the new/updated payment
-    const tempPayment: Transaction = editingPaymentId
+    const tempPayment: Transaction = editingId
       ? {
-          id: editingPaymentId,
-          amount: parseFloat(paymentAmount),
-          date: paymentDate.toISOString(),
+          id: editingId,
+          amount: parseFloat(amount),
+          date: date.toISOString(),
           type: "payment",
         }
       : {
           id: "temp",
-          amount: parseFloat(paymentAmount),
-          date: paymentDate.toISOString(),
+          amount: parseFloat(amount),
+          date: date.toISOString(),
           type: "payment",
         };
 
     // Remove the payment being edited from the list (if editing)
-    const transactionsWithoutCurrent = editingPaymentId
-      ? allTransactions.filter((t) => t.id !== editingPaymentId)
+    const transactionsWithoutCurrent = editingId
+      ? allTransactions.filter((t) => t.id !== editingId)
       : allTransactions;
 
     // Add the new/updated payment
@@ -421,14 +191,14 @@ export default function Index() {
 
     let updatedPayments: Transaction[];
 
-    if (editingPaymentId) {
+    if (editingId) {
       // Update existing payment
       updatedPayments = payments.map((payment) =>
-        payment.id === editingPaymentId
+        payment.id === editingId
           ? {
               ...payment,
-              amount: parseFloat(paymentAmount),
-              date: paymentDate.toISOString(),
+              amount: parseFloat(amount),
+              date: date.toISOString(),
             }
           : payment
       );
@@ -436,39 +206,23 @@ export default function Index() {
       // Create new payment
       const newPayment: Transaction = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        amount: parseFloat(paymentAmount),
-        date: paymentDate.toISOString(),
+        amount: parseFloat(amount),
+        date: date.toISOString(),
         type: "payment",
       };
       updatedPayments = [...payments, newPayment];
     }
 
     updatedPayments = sortTransactionsByDate(updatedPayments);
-    setPayments(updatedPayments);
-
-    try {
-      await AsyncStorage.setItem(
-        STORAGE_KEYS.PAYMENTS,
-        JSON.stringify(updatedPayments)
-      );
-    } catch (error) {
-      // Error saving payment
-    }
-
-    // Reset form
-    setPaymentAmount("");
-    setPaymentDate(new Date());
-    setShowPaymentModal(false);
-    setEditingPaymentId(null);
+    await savePayments(updatedPayments);
 
     // Recalculate
     calculateResults(updatedPayments, receipts);
   };
 
   const handleEditPayment = (payment: Transaction) => {
-    setEditingPaymentId(payment.id);
-    setPaymentAmount(payment.amount.toString());
-    setPaymentDate(new Date(payment.date));
+    // Set editing payment first, then open modal
+    setEditingPayment(payment);
     setShowPaymentModal(true);
   };
 
@@ -483,21 +237,13 @@ export default function Index() {
           style: "destructive",
           onPress: async () => {
             const updatedPayments = payments.filter((p) => p.id !== paymentId);
-            setPayments(updatedPayments);
-            try {
-              await AsyncStorage.setItem(
-                STORAGE_KEYS.PAYMENTS,
-                JSON.stringify(updatedPayments)
-              );
-              if (
-                calculationEndDate &&
-                interestRate &&
-                parseFloat(interestRate) > 0
-              ) {
-                calculateResults(updatedPayments, receipts);
-              }
-            } catch (error) {
-              // Error deleting payment
+            await savePayments(updatedPayments);
+            if (
+              calculationEndDate &&
+              interestRate &&
+              parseFloat(interestRate) > 0
+            ) {
+              calculateResults(updatedPayments, receipts);
             }
           },
         },
@@ -505,12 +251,16 @@ export default function Index() {
     );
   };
 
-  const handleReceiptSubmit = async () => {
-    if (!receiptAmount || parseFloat(receiptAmount) <= 0) return;
+  const handleReceiptSubmit = async (
+    amount: string,
+    date: Date,
+    editingId: string | null
+  ) => {
+    if (!amount || parseFloat(amount) <= 0) return;
 
     // Validate: Transaction date cannot be after "calculate interest upto" date
     if (calculationEndDate) {
-      const txDate = startOfDay(receiptDate);
+      const txDate = startOfDay(date);
       const calcDate = startOfDay(calculationEndDate);
       if (txDate.getTime() > calcDate.getTime()) {
         Alert.alert(
@@ -522,7 +272,7 @@ export default function Index() {
     }
 
     // Validate: If editing a receipt and changing its date, ensure first transaction is still a borrowal
-    if (editingReceiptId) {
+    if (editingId) {
       const allTransactions = [
         ...payments.map((t) => ({ ...t, type: "payment" as const })),
         ...receipts.map((t) => ({ ...t, type: "receipt" as const })),
@@ -530,15 +280,15 @@ export default function Index() {
 
       // Create a temporary receipt for the updated receipt
       const tempReceipt: Transaction = {
-        id: editingReceiptId,
-        amount: parseFloat(receiptAmount),
-        date: receiptDate.toISOString(),
+        id: editingId,
+        amount: parseFloat(amount),
+        date: date.toISOString(),
         type: "receipt",
       };
 
       // Remove the receipt being edited from the list
       const transactionsWithoutCurrent = allTransactions.filter(
-        (t) => t.id !== editingReceiptId
+        (t) => t.id !== editingId
       );
 
       // Add the updated receipt
@@ -567,14 +317,14 @@ export default function Index() {
 
     let updatedReceipts: Transaction[];
 
-    if (editingReceiptId) {
+    if (editingId) {
       // Update existing receipt
       updatedReceipts = receipts.map((receipt) =>
-        receipt.id === editingReceiptId
+        receipt.id === editingId
           ? {
               ...receipt,
-              amount: parseFloat(receiptAmount),
-              date: receiptDate.toISOString(),
+              amount: parseFloat(amount),
+              date: date.toISOString(),
             }
           : receipt
       );
@@ -582,39 +332,23 @@ export default function Index() {
       // Create new receipt
       const newReceipt: Transaction = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        amount: parseFloat(receiptAmount),
-        date: receiptDate.toISOString(),
+        amount: parseFloat(amount),
+        date: date.toISOString(),
         type: "receipt",
       };
       updatedReceipts = [...receipts, newReceipt];
     }
 
     updatedReceipts = sortTransactionsByDate(updatedReceipts);
-    setReceipts(updatedReceipts);
-
-    try {
-      await AsyncStorage.setItem(
-        STORAGE_KEYS.RECEIPTS,
-        JSON.stringify(updatedReceipts)
-      );
-    } catch (error) {
-      // Error saving receipt
-    }
-
-    // Reset form
-    setReceiptAmount("");
-    setReceiptDate(new Date());
-    setShowReceiptModal(false);
-    setEditingReceiptId(null);
+    await saveReceipts(updatedReceipts);
 
     // Recalculate
     calculateResults(payments, updatedReceipts);
   };
 
   const handleEditReceipt = (receipt: Transaction) => {
-    setEditingReceiptId(receipt.id);
-    setReceiptAmount(receipt.amount.toString());
-    setReceiptDate(new Date(receipt.date));
+    // Set editing receipt first, then open modal
+    setEditingReceipt(receipt);
     setShowReceiptModal(true);
   };
 
@@ -660,21 +394,13 @@ export default function Index() {
           style: "destructive",
           onPress: async () => {
             const updatedReceipts = receipts.filter((r) => r.id !== receiptId);
-            setReceipts(updatedReceipts);
-            try {
-              await AsyncStorage.setItem(
-                STORAGE_KEYS.RECEIPTS,
-                JSON.stringify(updatedReceipts)
-              );
-              if (
-                calculationEndDate &&
-                interestRate &&
-                parseFloat(interestRate) > 0
-              ) {
-                calculateResults(payments, updatedReceipts);
-              }
-            } catch (error) {
-              // Error deleting receipt
+            await saveReceipts(updatedReceipts);
+            if (
+              calculationEndDate &&
+              interestRate &&
+              parseFloat(interestRate) > 0
+            ) {
+              calculateResults(payments, updatedReceipts);
             }
           },
         },
@@ -2527,7 +2253,10 @@ export default function Index() {
           <View className="flex-row w-full mb-4" style={{ gap: 8 }}>
             <Button
               className="bg-red-600 flex-1"
-              onPress={() => setShowReceiptModal(true)}
+              onPress={() => {
+                setEditingReceipt(null);
+                setShowReceiptModal(true);
+              }}
               style={{
                 minHeight: 48,
                 paddingVertical: 8,
@@ -2544,7 +2273,10 @@ export default function Index() {
             </Button>
             <Button
               className="bg-green-600 flex-1"
-              onPress={() => setShowPaymentModal(true)}
+              onPress={() => {
+                setEditingPayment(null);
+                setShowPaymentModal(true);
+              }}
               style={{
                 minHeight: 48,
                 paddingVertical: 8,
@@ -2697,139 +2429,22 @@ export default function Index() {
           </View>
 
           {/* Simple table of all borrowals and repayments */}
-          {combinedTransactions.length > 0 ? (
-            <View className="mb-4 p-3 bg-muted rounded-lg">
-              <Text variant="h3" className="mb-2">
-                Transactions
-              </Text>
-              {/* Header */}
-              <View className="flex-row justify-between pb-1 border-b border-border mb-2">
-                <Text className="text-xs font-semibold w-[25%]">Date</Text>
-                <Text className="text-xs font-semibold w-[25%] text-center">
-                  Type
-                </Text>
-                <Text className="text-xs font-semibold w-[25%] text-right">
-                  Amount (₹)
-                </Text>
-                <Text className="text-xs font-semibold w-[25%] text-center">
-                  Actions
-                </Text>
-              </View>
-              {/* Rows */}
-              {combinedTransactions.map((t) => (
-                <View
-                  key={`table-${t.id}`}
-                  className="flex-row justify-between py-1 items-center"
-                >
-                  <Text className="text-xs w-[25%]">
-                    {new Date(t.date).toLocaleDateString()}
-                  </Text>
-                  <Text className="text-xs w-[25%] text-center">
-                    {t.type === "receipt" ? "Borrowal" : "Repayment"}
-                  </Text>
-                  <Text className="text-xs w-[25%] text-right">
-                    {formatCurrency(t.amount)}
-                  </Text>
-                  <View className="flex-row justify-center items-center w-[25%]">
-                    {t.type === "payment" ? (
-                      <>
-                        <Button
-                          variant="outline"
-                          className="h-7 w-7 rounded-full p-0 mr-1 bg-white dark:bg-gray-800 border-blue-600 dark:border-blue-400 items-center justify-center"
-                          onPress={() => handleEditPayment(t)}
-                          hitSlop={{
-                            top: 8,
-                            bottom: 8,
-                            left: 8,
-                            right: 8,
-                          }}
-                        >
-                          <MaterialIcons
-                            name="edit"
-                            size={14}
-                            color="#2563eb"
-                          />
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          className="h-7 w-7 rounded-full p-0 bg-red-600 items-center justify-center"
-                          onPress={() => handleDeletePayment(t.id)}
-                          hitSlop={{
-                            top: 8,
-                            bottom: 8,
-                            left: 8,
-                            right: 8,
-                          }}
-                        >
-                          <MaterialIcons
-                            name="delete"
-                            size={14}
-                            color="#ffffff"
-                          />
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <Button
-                          variant="outline"
-                          className="h-7 w-7 rounded-full p-0 mr-1 bg-white dark:bg-gray-800 border-blue-600 dark:border-blue-400 items-center justify-center"
-                          onPress={() => handleEditReceipt(t)}
-                          hitSlop={{
-                            top: 8,
-                            bottom: 8,
-                            left: 8,
-                            right: 8,
-                          }}
-                        >
-                          <MaterialIcons
-                            name="edit"
-                            size={14}
-                            color="#2563eb"
-                          />
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          className="h-7 w-7 rounded-full p-0 bg-red-600 items-center justify-center"
-                          onPress={() => handleDeleteReceipt(t.id)}
-                          hitSlop={{
-                            top: 8,
-                            bottom: 8,
-                            left: 8,
-                            right: 8,
-                          }}
-                        >
-                          <MaterialIcons
-                            name="delete"
-                            size={14}
-                            color="#ffffff"
-                          />
-                        </Button>
-                      </>
-                    )}
-                  </View>
-                </View>
-              ))}
-            </View>
-          ) : null}
+          <TransactionTable
+            transactions={combinedTransactions}
+            onEditPayment={handleEditPayment}
+            onDeletePayment={handleDeletePayment}
+            onEditReceipt={handleEditReceipt}
+            onDeleteReceipt={handleDeleteReceipt}
+          />
 
           {/* Results Display */}
-          {hasCalculated &&
-          calculationSuccessful &&
-          (calculatedResultsInterest > 0 || loanAmount !== 0) ? (
-            <>
-              <View className="mb-6 p-4 bg-muted rounded-lg">
-                <Text variant="h3" className="mb-2">
-                  Calculated Results
-                </Text>
-                <Text className="mb-1">{`Outstanding Principal: ₹${formatCurrency(loanAmount)}`}</Text>
-                <Text className="mb-1">{`Interest: ₹${formatCurrency(calculatedResultsInterest)}`}</Text>
-                <Text variant="h4" className="mt-2">
-                  {`Total Amount Due: ₹${formatCurrency(calculatedAmount)}`}
-                </Text>
-                {/* Removed overall summary range display per request */}
-              </View>
-            </>
-          ) : null}
+          {hasCalculated && calculationSuccessful && (
+            <CalculatedResults
+              loanAmount={loanAmount}
+              calculatedResultsInterest={calculatedResultsInterest}
+              calculatedAmount={calculatedAmount}
+            />
+          )}
 
           {/* Yearly compounding summaries (every 1 calendar year since first transaction) */}
           {/* Yearly summaries are interleaved with transactions below */}
@@ -3758,142 +3373,34 @@ export default function Index() {
       </View>
 
       {/* Payment Modal */}
-      <Modal
+      <TransactionModal
+        key={`payment-${editingPayment?.id || "new"}-${showPaymentModal}`}
         visible={showPaymentModal}
         onClose={() => {
           setShowPaymentModal(false);
-          setShowPaymentDatePicker(false);
-          setEditingPaymentId(null);
-          setPaymentAmount("");
-          setPaymentDate(new Date());
+          setEditingPayment(null);
         }}
-        title={editingPaymentId ? "Edit repayment" : "Add repayment"}
-      >
-        <View className="pb-4">
-          <Input
-            label="Repayment Amount (₹)"
-            value={paymentAmount}
-            onChangeText={(text) => {
-              const validated = validateAmountInput(text);
-              setPaymentAmount(validated);
-            }}
-            keyboardType="number-pad"
-            placeholder="0"
-          />
-          <View className="mt-4">
-            <Text className="mb-2 text-sm font-medium">Repayment Date</Text>
-            <Button
-              variant="outline"
-              onPress={() => setShowPaymentDatePicker(true)}
-              className="flex-row items-center gap-2"
-            >
-              <MaterialIcons
-                name="calendar-today"
-                size={18}
-                color={colorScheme === "dark" ? "#fff" : "#000"}
-              />
-              <Text>
-                {paymentDate
-                  ? new Date(paymentDate).toLocaleDateString()
-                  : "Select date"}
-              </Text>
-            </Button>
-            {showPaymentDatePicker && (
-              <DateTimePicker
-                value={paymentDate || new Date()}
-                mode="date"
-                display={Platform.OS === "ios" ? "spinner" : "default"}
-                onChange={(event, selectedDate) => {
-                  setShowPaymentDatePicker(Platform.OS === "ios");
-                  if (selectedDate) {
-                    const d = new Date(selectedDate);
-                    d.setHours(0, 0, 0, 0);
-                    setPaymentDate(d);
-                  }
-                }}
-              />
-            )}
-          </View>
-          <Button
-            className="bg-green-600 mt-6"
-            onPress={handlePaymentSubmit}
-            disabled={!paymentAmount || parseFloat(paymentAmount) <= 0}
-          >
-            <Text className="text-white">
-              {editingPaymentId ? "Update repayment" : "Add repayment"}
-            </Text>
-          </Button>
-        </View>
-      </Modal>
+        onSubmit={(amount, date) =>
+          handlePaymentSubmit(amount, date, editingPayment?.id || null)
+        }
+        editingTransaction={editingPayment}
+        type="payment"
+      />
 
       {/* Receipt Modal */}
-      <Modal
+      <TransactionModal
+        key={`receipt-${editingReceipt?.id || "new"}-${showReceiptModal}`}
         visible={showReceiptModal}
         onClose={() => {
           setShowReceiptModal(false);
-          setShowReceiptDatePicker(false);
-          setEditingReceiptId(null);
-          setReceiptAmount("");
-          setReceiptDate(new Date());
+          setEditingReceipt(null);
         }}
-        title={editingReceiptId ? "Edit borrowal" : "Add borrowal"}
-      >
-        <View className="pb-4">
-          <Input
-            label="Borrowal Amount (₹)"
-            value={receiptAmount}
-            onChangeText={(text) => {
-              const validated = validateAmountInput(text);
-              setReceiptAmount(validated);
-            }}
-            keyboardType="number-pad"
-            placeholder="0"
-          />
-          <View className="mt-4">
-            <Text className="mb-2 text-sm font-medium">Borrowal Date</Text>
-            <Button
-              variant="outline"
-              onPress={() => setShowReceiptDatePicker(true)}
-              className="flex-row items-center gap-2"
-            >
-              <MaterialIcons
-                name="calendar-today"
-                size={18}
-                color={colorScheme === "dark" ? "#fff" : "#000"}
-              />
-              <Text>
-                {receiptDate
-                  ? new Date(receiptDate).toLocaleDateString()
-                  : "Select date"}
-              </Text>
-            </Button>
-            {showReceiptDatePicker && (
-              <DateTimePicker
-                value={receiptDate || new Date()}
-                mode="date"
-                display={Platform.OS === "ios" ? "spinner" : "default"}
-                onChange={(event, selectedDate) => {
-                  setShowReceiptDatePicker(Platform.OS === "ios");
-                  if (selectedDate) {
-                    const d = new Date(selectedDate);
-                    d.setHours(0, 0, 0, 0);
-                    setReceiptDate(d);
-                  }
-                }}
-              />
-            )}
-          </View>
-          <Button
-            className="bg-red-600 mt-6"
-            onPress={handleReceiptSubmit}
-            disabled={!receiptAmount || parseFloat(receiptAmount) <= 0}
-          >
-            <Text className="text-white">
-              {editingReceiptId ? "Update borrowal" : "Add borrowal"}
-            </Text>
-          </Button>
-        </View>
-      </Modal>
+        onSubmit={(amount, date) =>
+          handleReceiptSubmit(amount, date, editingReceipt?.id || null)
+        }
+        editingTransaction={editingReceipt}
+        type="receipt"
+      />
     </SafeAreaView>
   );
 }
