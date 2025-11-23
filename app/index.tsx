@@ -1898,7 +1898,7 @@ export default function Index() {
 <body>
   <h1>Money Lender - Transaction Report</h1>
   <p><strong>Generated:</strong> ${new Date().toLocaleString()}</p>
-  <p><strong>Interest Rate:</strong> ${interestRate || "N/A"}% per year (360 day year)</p>
+  <p><strong>Interest Rate:</strong> ${interestRate || "N/A"}% for 360 days</p>
   ${calculationEndDate ? `<p><strong>Calculate Interest Up To:</strong> ${calculationEndDate.toLocaleDateString()}</p>` : ""}
   
   <h2>Transactions Summary</h2>
@@ -2564,7 +2564,7 @@ export default function Index() {
           <View className="mb-4">
             <View className="mb-2 flex-row items-center">
               <Text className="text-sm font-medium">
-                Loan Interest Rate per Year (%) - 360 Day Year{" "}
+                Loan Interest Rate for 360 Days(%){" "}
                 <Text className="text-red-500">*</Text>
               </Text>
             </View>

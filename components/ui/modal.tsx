@@ -2,6 +2,7 @@ import { THEME } from "@/lib/theme";
 import { useTheme } from "@/lib/theme-context";
 import React from "react";
 import {
+  Dimensions,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -23,6 +24,7 @@ export interface ModalProps {
 const ModalComponent = ({ visible, onClose, title, children }: ModalProps) => {
   const { colorScheme } = useTheme();
   const theme = colorScheme === "dark" ? THEME.dark : THEME.light;
+  const screenWidth = Dimensions.get("window").width;
 
   const handleBackdropPress = () => {
     Keyboard.dismiss();
@@ -57,6 +59,9 @@ const ModalComponent = ({ visible, onClose, title, children }: ModalProps) => {
               borderTopWidth: 1,
               borderTopColor: theme.border,
               maxHeight: Platform.OS === "ios" ? "90%" : "85%",
+              marginHorizontal: screenWidth * 0.05, // 5% margin on each side = 90% width
+              alignSelf: "center",
+              width: screenWidth * 0.9,
             }}
             onPress={(e) => e.stopPropagation()}
           >
